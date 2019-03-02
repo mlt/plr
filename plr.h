@@ -385,13 +385,13 @@ extern void R_RunExitFinalizers(void);
 		HeapTupleHeaderSetTypMod(dtrigtup, tupdesc->tdtypmod); \
 		SET_ARG(PointerGetDatum(dtrigtup),false,7); \
 	} while (0)
-#define CONVERT_TUPLE_TO_DATAFRAME \
+#define CONVERT_TUPLE_TO_DATAFRAME(t) \
 	do { \
 		Oid			tupType; \
 		int32		tupTypmod; \
 		TupleDesc	tupdesc; \
 		HeapTuple	tuple = palloc(sizeof(HeapTupleData)); \
-		HeapTupleHeader	tuple_hdr = DatumGetHeapTupleHeader(GET_ARG_VALUE(i)); \
+		HeapTupleHeader	tuple_hdr = DatumGetHeapTupleHeader(t); \
 		tupType = HeapTupleHeaderGetTypeId(tuple_hdr); \
 		tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr); \
 		tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod); \
