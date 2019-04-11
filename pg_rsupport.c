@@ -659,7 +659,7 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
 
-		argvalues[i] = get_scalar_datum(obj, typeids[i], typinfuncs[i], &isnull);
+		argvalues[i] = get_scalar_datum(obj, typeids[i], typinfuncs[i], &isnull, 0);
 		if (!isnull)
 			nulls[i] = ' ';
 		else

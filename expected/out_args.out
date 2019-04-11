@@ -1,5 +1,13 @@
+create or replace function out__float8(out x float8[], out y float8[], out z float8[]) returns setof record as $$
+  array(1:27,rep(3,3))
+$$ language plr;
+select * from out__float8() limit 1;
+     x     |     y     |     z     
+-----------+-----------+-----------
+ {1,10,19} | {4,13,22} | {7,16,25}
+(1 row)
+
 -- this is non-SRF returning record
---create or replace function out_float8(out x float8, in a float8, out y float8[]) as $$
 create or replace function out_float8(out x anyelement, in a anyelement, out y anyarray) as $$
   list(a, rep(a, 3))
 $$ language plr;

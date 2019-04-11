@@ -39,28 +39,17 @@ static void pg_get_one_r(char *value, Oid arg_out_fn_oid, SEXP *obj,
 static SEXP get_r_vector(Oid typtype, int64 numels);
 static Datum get_trigger_tuple(SEXP rval, plr_function *function,
 									FunctionCallInfo fcinfo, bool *isnull);
-static Datum get_tuplestore(SEXP rval, plr_function *function,
-									FunctionCallInfo fcinfo, bool *isnull);
+static Datum get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
 static Datum get_simple_array_datum(SEXP rval, Oid typelem, bool *isnull);
 static Datum get_array_datum(SEXP rval, plr_function *function, int col, bool *isnull);
+static inline Datum get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool *isnull);
 static Datum get_frame_array_datum(SEXP rval, plr_function *function, int col,
 																bool *isnull);
 static Datum get_md_array_datum(SEXP rval, int ndims, plr_function *function, int col,
 																bool *isnull);
 static Datum get_generic_array_datum(SEXP rval, plr_function *function, int col,
 																bool *isnull);
-static Tuplestorestate *get_frame_tuplestore(SEXP rval,
-											 plr_function *function,
-											 AttInMetadata *attinmeta,
-											 MemoryContext per_query_ctx);
-static Tuplestorestate *get_matrix_tuplestore(SEXP rval,
-											 plr_function *function,
-											 AttInMetadata *attinmeta,
-											 MemoryContext per_query_ctx);
-static Tuplestorestate *get_generic_tuplestore(SEXP rval,
-											 plr_function *function,
-											 AttInMetadata *attinmeta,
-											 MemoryContext per_query_ctx);
+static void get_tuplestore_imp(SEXP rval, plr_function *function, TupleDesc tupdesc, Tuplestorestate *tupstore);
 static SEXP coerce_to_char(SEXP rval);
 static Datum r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
 
@@ -650,23 +639,19 @@ r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 	if (CALLED_AS_TRIGGER(fcinfo))
 		result = get_trigger_tuple(rval, function, fcinfo, &isnull);
 	else if (fcinfo->flinfo->fn_retset)
-		result = get_tuplestore(rval, function, fcinfo, &isnull);
+		return get_tuplestore(rval, function, fcinfo);
 	else if (function->result_natts > 1)
-		result = r_get_tuple(rval, function, fcinfo);
+		return r_get_tuple(rval, function, fcinfo);
 	else
 	{
 		/* short circuit if return value is Null */
 		if (rval == R_NilValue || isNull(rval))	/* probably redundant */
-		{
-			fcinfo->isnull = true;
-			return (Datum) 0;
-		}
+			PG_RETURN_NULL();
 
 		if (function->result_fld_elem_typid[0] == function->result_fld_typid[0])
-			result = get_scalar_datum(rval, function->result_fld_typid[0], function->result_fld_elem_in_func[0], &isnull);
+			result = get_scalar_datum(rval, function->result_fld_typid[0], function->result_fld_elem_in_func[0], &isnull, 0);
 		else
 			result = get_array_datum(rval, function, 0, &isnull);
-
 	}
 
 	if (isnull)
@@ -739,7 +724,7 @@ get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull)
 	}
 
 	if (typelem == InvalidOid)
-		result = get_scalar_datum(rval, typid, in_func, isnull);
+		result = get_scalar_datum(rval, typid, in_func, isnull, 0);
 	else
 		result = get_simple_array_datum(rval, typelem, isnull);
 
@@ -928,14 +913,13 @@ get_trigger_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bo
 }
 
 static Datum
-get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bool *isnull)
+get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 {
-	ReturnSetInfo  *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
-	TupleDesc		tupdesc;
-	AttInMetadata  *attinmeta;
-	MemoryContext	per_query_ctx;
-	MemoryContext	oldcontext;
-	int				nc;
+	ReturnSetInfo	   *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
+	Tuplestorestate	   *tupstore;
+	TupleDesc			tupdesc;
+	MemoryContext		per_query_ctx;
+	MemoryContext		oldcontext;
 
 	/* check to see if caller supports us returning a tuplestore */
 	if (!rsinfo || !(rsinfo->allowedModes & SFRM_Materialize))
@@ -944,46 +928,22 @@ get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bool 
 				 errmsg("materialize mode required, but it is not "
 						"allowed in this context")));
 
-	if (isFrame(rval))
-		nc = length(rval);
-	else if (isList(rval) || isNewList(rval))
-		nc = length(rval);
-	else if (isMatrix(rval))
-		nc = ncols(rval);
-	else
-		nc = 1;
-
 	per_query_ctx = rsinfo->econtext->ecxt_per_query_memory;
 	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
 	/* get the requested return tuple description */
 	tupdesc = CreateTupleDescCopy(rsinfo->expectedDesc);
 
-	/*
-	 * Check to make sure we have the same number of columns
-	 * to return as there are attributes in the return tuple.
-	 *
-	 * Note we will attempt to coerce the R values into whatever
-	 * the return attribute type is and depend on the "in"
-	 * function to complain if needed.
-	 */
-	if (nc != tupdesc->natts)
-		ereport(ERROR,
-				(errcode(ERRCODE_SYNTAX_ERROR),
-				 errmsg("query-specified return tuple and "
-						"function returned data.frame are not compatible")));
+	/* initialize our tuplestore */
+	tupstore = TUPLESTORE_BEGIN_HEAP;
 
-	attinmeta = TupleDescGetAttInMetadata(tupdesc);
+	MemoryContextSwitchTo(oldcontext);
 
 	/* OK, go to work */
 	rsinfo->returnMode = SFRM_Materialize;
-
-	if (isFrame(rval) || isList(rval) || isNewList(rval))
-		rsinfo->setResult = get_frame_tuplestore(rval, function, attinmeta, per_query_ctx);
-	else if (isMatrix(rval))
-		rsinfo->setResult = get_matrix_tuplestore(rval, function, attinmeta, per_query_ctx);
-	else
-		rsinfo->setResult = get_generic_tuplestore(rval, function, attinmeta, per_query_ctx);
+	rsinfo->setResult = tupstore;
+	rsinfo->setDesc = tupdesc;
+	get_tuplestore_imp(rval, function, tupdesc, tupstore);
 
 	/*
 	 * SFRM_Materialize mode expects us to return a NULL Datum. The actual
@@ -992,114 +952,99 @@ get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bool 
 	 * that we actually used to build our tuples with, so the caller can
 	 * verify we did what it was expecting.
 	 */
-	rsinfo->setDesc = tupdesc;
-	MemoryContextSwitchTo(oldcontext);
 
-	*isnull = true;
-	return (Datum) 0;
+	PG_RETURN_NULL();
 }
 
 Datum
-get_scalar_datum(SEXP rval, Oid result_typid, FmgrInfo result_in_func, bool *isnull)
+get_scalar_datum(SEXP rval, Oid result_typid, FmgrInfo result_in_func, bool *isnull, int idx)
 {
-	Datum		dvalue;
-	SEXP		obj;
-	const char *value = NULL;
+	/*
+	 * passing a null into something like
+	 * return as.real(NULL) will return numeric(0)
+	 * which has a length of 0
+	 */
+	if (isNumeric(rval) && length(rval) == 0)
+	{
+		*isnull = true;
+		return (Datum)0;
+	}
 
 	/*
-	 * Element type is zero, we don't have an array, so coerce to string
-	 * and take the first element as a scalar
+	 * Element type is zero, we don't have an array, so, unless not a direct match,
+	 * coerce to string and take the first element as a scalar
 	 *
 	 * Exception: if result type is BYTEA, we want to return the whole
 	 * object in serialized form
 	 */
-	if (result_typid != BYTEAOID)
+	switch (result_typid)
 	{
-		PROTECT(obj = coerce_to_char(rval));
-		/*
-		 * passing a null into something like
-		 * return as.real(NULL) will return numeric(0)
-		 * which has a length of 0
-		 */
-		if ( (isNumeric(rval) && length(rval) == 0) || STRING_ELT(obj, 0) == NA_STRING)
+		case BOOLOID:
+		case INT4OID:
+			switch (TYPEOF(rval))
+			{
+				case LGLSXP:
+				case INTSXP:
+					*isnull = NA_INTEGER == INTEGER_ELT(rval, idx);
+					return Int32GetDatum(INTEGER_ELT(rval, idx));
+			};
+			break;
+		case FLOAT4OID:
+			switch (TYPEOF(rval))
+			{
+				case REALSXP:
+					*isnull = ISNA(REAL_ELT(rval, idx));
+					return Float4GetDatum((float4)REAL_ELT(rval, idx));
+
+			}
+			break;
+		case FLOAT8OID:
+			switch (TYPEOF(rval))
+			{
+				case REALSXP:
+					*isnull = ISNA(REAL_ELT(rval, idx));
+					return Float8GetDatum(REAL_ELT(rval, idx));
+
+			}
+			break;
+		case BYTEAOID:
 		{
-			UNPROTECT(1);
-			*isnull = true;
-			dvalue = (Datum) 0;
-			return dvalue;
-		}
-		obj = STRING_ELT(obj, 0);
-		if (TYPEOF(obj) == CHARSXP )
-		{
-			value = CHAR(obj);
-		}
-		else
-		{
-			ereport(ERROR,
+			SEXP		obj;
+			int			len, rsize, status;
+			bytea	   *result;
+			char	   *rptr;
+			const char *value = NULL;
+
+			PROTECT(obj = R_tryEval(lang3(install("serialize"), rval, R_NilValue), R_GlobalEnv, &status));
+			if (status != 0)
+			{
+				if (last_R_error_msg)
+					ereport(ERROR,
 					(errcode(ERRCODE_DATA_EXCEPTION),
 					 errmsg("R interpreter expression evaluation error"),
-					 errdetail("return type cannot be coerced to char")));
+					 errdetail("%s", last_R_error_msg)));
+				else
+					ereport(ERROR,
+					(errcode(ERRCODE_DATA_EXCEPTION),
+					 errmsg("R interpreter expression evaluation error"),
+					 errdetail("R expression evaluation error caught in \"serialize\".")));
+			}
+			len = LENGTH(obj);
+
+			rsize = VARHDRSZ + len;
+			result = (bytea *)palloc(rsize);
+			SET_VARSIZE(result, rsize);
+			rptr = VARDATA(result);
+			memcpy(rptr, (char *)RAW(obj), rsize - VARHDRSZ);
+
+			UNPROTECT(1);
+
+			*isnull = false;
+			return PointerGetDatum(result);
 		}
-		UNPROTECT(1);
-		
-		if (value != NULL)
-		{
-			dvalue = FunctionCall3(&result_in_func,
-									CStringGetDatum(value),
-									ObjectIdGetDatum(0),
-									Int32GetDatum(-1));
-		}
-		else
-		{
-			*isnull = true;
-			dvalue = (Datum) 0;
-		}
-	}
-	else
-	{
-		SEXP 	s, t;
-		int		len, rsize, status;
-		bytea  *result;
-		char   *rptr;
+	};
 
-		/*
-		 * Need to construct a call to
-		 * serialize(rval, NULL)
-		 */
-		PROTECT(t = s = allocList(3));
-		SET_TYPEOF(s, LANGSXP);
-		SETCAR(t, install("serialize")); t = CDR(t);
-		SETCAR(t, rval); t = CDR(t);
-		SETCAR(t, R_NilValue);
-
-		PROTECT(obj = R_tryEval(s, R_GlobalEnv, &status));
-		if(status != 0)
-		{
-			if (last_R_error_msg)
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_EXCEPTION),
-						 errmsg("R interpreter expression evaluation error"),
-						 errdetail("%s", last_R_error_msg)));
-			else
-				ereport(ERROR,
-						(errcode(ERRCODE_DATA_EXCEPTION),
-						 errmsg("R interpreter expression evaluation error"),
-						 errdetail("R expression evaluation error caught in \"serialize\".")));
-		}
-		len = LENGTH(obj);
-
-		rsize = VARHDRSZ + len;
-		result = (bytea *) palloc(rsize);
-		SET_VARSIZE(result, rsize);
-		rptr = VARDATA(result);
-		memcpy(rptr, (char *) RAW(obj), rsize - VARHDRSZ);
-
-		UNPROTECT(2);
-
-		dvalue = PointerGetDatum(result);
-	}
-
-	return dvalue;
+	return get_scalar_datum_through_text(rval, idx, result_in_func, isnull);
 }
 
 static Datum
@@ -1133,6 +1078,78 @@ get_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
 		/* create an empty array */
 		return PointerGetDatum(construct_empty_array(function->result_fld_elem_typid[col]));
 	}
+}
+
+static inline Datum
+get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool * isnull)
+{
+	SEXP		obj;
+	const char *value;
+
+	if (TYPEOF(rval) == STRSXP)
+		obj = rval;
+	else
+	{
+		if (likely(!isFactor(rval)))
+		{
+			/*
+			 * ExtractSubset is hidden and is accidentally exposed on Windows. Should not rely on it.
+			 * Let's keep it here in case it gets exported.
+			 */
+#if 0
+			obj = coerce_to_char(length(rval) > 1 ? ExtractSubset(rval, ScalarInteger(idx + 1), NULL) : rval);
+#else
+			if (length(rval) > 1)
+			{
+				int status;
+				obj = coerce_to_char(R_tryEval(lang3(R_Bracket2Symbol, rval, ScalarInteger(idx + 1)), R_GlobalEnv, &status));
+				if (unlikely(status))
+					elog(ERROR, "Failed to get subscript");
+			}
+			else
+				obj = coerce_to_char(rval);
+#endif
+			idx = 0;
+		}
+		else
+		{
+			obj = GET_LEVELS(rval);
+			idx = INTEGER_ELT(rval, idx) - 1;
+		}
+	}
+
+	/*
+	 * object coerced to absent string
+	 */
+	if (STRING_ELT(obj, idx) == NA_STRING)
+	{
+		*isnull = true;
+		return (Datum)0;
+	}
+	obj = STRING_ELT(obj, idx);
+	if (TYPEOF(obj) == CHARSXP)
+	{
+		value = CHAR(obj);
+	}
+	else
+	{
+		ereport(ERROR,
+			(errcode(ERRCODE_DATA_EXCEPTION),
+			 errmsg("R interpreter expression evaluation error"),
+			 errdetail("return type cannot be coerced to char")));
+	}
+
+	if (value != NULL)
+	{
+		*isnull = false;
+		return FunctionCall3(&result_in_func,
+							 CStringGetDatum(value),
+							 ObjectIdGetDatum(0),
+							 Int32GetDatum(-1));
+	}
+
+	*isnull = true;
+	return (Datum)0;
 }
 
 static Datum
@@ -1834,23 +1851,58 @@ get_generic_array_datum(SEXP rval, plr_function *function, int col, bool *isnull
 	return dvalue;
 }
 
-static Tuplestorestate *
-get_frame_tuplestore(SEXP rval,
+static void
+get_tuplestore_imp(SEXP rval,
 					 plr_function *function,
-					 AttInMetadata *attinmeta,
-					 MemoryContext per_query_ctx)
+					 TupleDesc tupdesc,
+					 Tuplestorestate *tupstore)
 {
-	Tuplestorestate	   *tupstore;
-	char			  **values;
-	HeapTuple			tuple;
-	TupleDesc			tupdesc = attinmeta->tupdesc;
+	Datum			   *values;
+	bool			   *isnull;
 	int					tupdesc_nc = tupdesc->natts;
-	MemoryContext		oldcontext;
-	int					i, j;
-	int					nr = 0;
-	int					nc = length(rval);
-	SEXP				dfcol;
-	SEXP				result;
+	int					i, j, idx;
+	int					nr;
+	int					nc;
+	SEXP				dim, el;
+	int					dim_length, status;
+	SEXP				t, args;
+	int					is_frame = isFrame(rval);
+
+	if (is_frame)
+	{
+		nc = length(rval);
+		PROTECT(el = VECTOR_ELT(rval, 0));
+		nr = length(el);
+		UNPROTECT(1);
+	}
+	else
+	{
+		dim = GET_DIM(rval);
+		dim_length = length(dim);
+		if (dim_length > 0)
+			nr = INTEGER_ELT(dim, 0);
+		if (dim_length > 1)
+			nc = INTEGER_ELT(dim, 1);
+		else
+			nc = 1;
+		if (dim_length == 0)
+		{
+			nr = length(rval);
+			dim_length = 1;
+		}
+
+		if (dim_length > 2)
+		{
+			/* prepare for rval[i,j,...] subsetting */
+			t = args = PROTECT(allocList(dim_length + 2));
+			SET_TYPEOF(args, LANGSXP);
+			SETCAR(t, R_BracketSymbol); t = CDR(t);
+			SETCAR(t, rval); t = CDR(t);
+			for (i = 0; i < dim_length; i++, t = CDR(t))
+				SETCAR(t, R_MissingArg);
+			t = CDDR(args);
+		} /* otherwise we can tap into corresponding element directly */
+	}
 
 	if (nc != tupdesc_nc)
 		ereport(ERROR,
@@ -1858,252 +1910,59 @@ get_frame_tuplestore(SEXP rval,
 			errmsg("actual and requested return type mismatch"),
 			errdetail("Actual return type has %d columns, but " \
 					  "requested return type has %d", nc, tupdesc_nc)));
-		
-	/* switch to appropriate context to create the tuple store */
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
 
-	/* initialize our tuplestore */
-	tupstore = TUPLESTORE_BEGIN_HEAP;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	/*
-	 * If we return a set, get number of rows by examining the first column.
-	 * Otherwise, stop at one row.
-	 */
-	if (isFrame(rval))
-	{
-		PROTECT(dfcol = VECTOR_ELT(rval, 0));
-		nr = length(dfcol);
-		UNPROTECT(1);
-	}
-	else if (isList(rval) || isNewList(rval))
-		nr = 1;
-
-	/* coerce columns to character in advance */
-	PROTECT(result = NEW_LIST(nc));
-	for (j = 0; j < nc; j++)
-	{
-		PROTECT(dfcol = VECTOR_ELT(rval, j));
-		if((!isFactor(dfcol)) &&
-		   ((TUPLE_DESC_ATTR(tupdesc,j)->attndims == 0) ||
-			(TYPEOF(dfcol) != VECSXP)))
-		{
-			SEXP	obj;
-
-			PROTECT(obj = coerce_to_char(dfcol));
-			SET_VECTOR_ELT(result, j, obj);
-			UNPROTECT(1);
-		}
-		else
-		{
-			SEXP 	t;
-
-			for (t = ATTRIB(dfcol); t != R_NilValue; t = CDR(t))
-			{
-				if(TAG(t) == R_LevelsSymbol)
-				{
-					PROTECT(SETCAR(t, coerce_to_char(CAR(t))));
-					UNPROTECT(1);
-					break;
-				}
-			}
-			SET_VECTOR_ELT(result, j, dfcol);
-		}
-
-		UNPROTECT(1);
-	}
-
-	values = (char **) palloc(nc * sizeof(char *));
+	values = palloc0(sizeof(Datum) * tupdesc_nc);
+	isnull = palloc0(sizeof(bool) * tupdesc_nc);
 
 	for(i = 0; i < nr; i++)
 	{
 		for (j = 0; j < nc; j++)
 		{
-			PROTECT(dfcol = VECTOR_ELT(result, j));
-
-			if(isFactor(dfcol))
+			if (likely(is_frame))
 			{
-				SEXP t;
-
-				/*
-				 * a factor is a special type of integer
-				 * but must check for NA value first
-				 */
-				if (INTEGER_ELT(dfcol, i) != NA_INTEGER)
-				{
-					for (t = ATTRIB(dfcol); t != R_NilValue; t = CDR(t))
-					{
-						if(TAG(t) == R_LevelsSymbol)
-						{
-							SEXP	obj;
-							int		idx = INTEGER(dfcol)[i] - 1;
-
-							PROTECT(obj = CAR(t));
-							values[j] = pstrdup(CHAR(STRING_ELT(obj, idx)));
-							UNPROTECT(1);
-
-							break;
-						}
-					}
-				}
-				else
-					values[j] = NULL;
+				PROTECT(el = VECTOR_ELT(rval, j));
+				idx = i;
 			}
-			else if (STRING_ELT(dfcol, i) != NA_STRING)
-				values[j] = pstrdup(CHAR(STRING_ELT(dfcol, i)));
+			else if (dim_length <= 2) /* matrix and array up to 2D */
+			{
+				PROTECT(el = rval);
+				idx = i + nr * j;
+			}
 			else
-				values[j] = NULL;
+			{
+				/* worst case as we need to subset from within R and request new data_ptr */
+				SETCAR(t, ScalarInteger(i + 1));
+				SETCADR(t, ScalarInteger(j + 1));
+				PROTECT(el = R_tryEval(args, R_GlobalEnv, &status));
+				result->data_ptr[j] = STDVEC_DATAPTR(el);
+				/* we expect PG array */
+				Assert(result->typid[j] != result->elem_typid[j]);
+
+				if (unlikely(status))
+					elog(ERROR, "Failed to get subscript");
+			}
+
+			if (likely(function->result_fld_typid[j] == function->result_fld_elem_typid[j]))
+				values[j] = get_scalar_datum(el,
+											 function->result_fld_elem_typid[j],
+											 function->result_fld_elem_in_func[j],
+											 isnull + j,
+											 idx);
+			else
+				values[j] = get_array_datum(el, function, j, isnull + j);
 
 			UNPROTECT(1);
 		}
 
-		/* construct the tuple */
-		tuple = BuildTupleFromCStrings(attinmeta, values);
-
-		/* switch to appropriate context while storing the tuple */
-		oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-		/* now store it */
-		tuplestore_puttuple(tupstore, tuple);
-
-		/* now reset the context */
-		MemoryContextSwitchTo(oldcontext);
-
-		for (j = 0; j < nc; j++)
-			if (values[j] != NULL)
-				pfree(values[j]);
+		/* Context is switched internally */
+		tuplestore_putvalues(tupstore, tupdesc, values, isnull);
 	}
-	UNPROTECT(1);
 
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-	tuplestore_donestoring(tupstore);
-	MemoryContextSwitchTo(oldcontext);
+	if (!is_frame && dim_length > 2)
+		UNPROTECT(1); /* rval[i,j,...] call */
 
-	return tupstore;
-}
-
-static Tuplestorestate *
-get_matrix_tuplestore(SEXP rval,
-					 plr_function *function,
-					 AttInMetadata *attinmeta,
-					 MemoryContext per_query_ctx)
-{
-	Tuplestorestate	   *tupstore;
-	char			  **values;
-	HeapTuple			tuple;
-	MemoryContext		oldcontext;
-	SEXP				obj;
-	int					i, j;
-	int					nr;
-	int					nc = ncols(rval);
-
-	/* switch to appropriate context to create the tuple store */
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	/*
-	 * If we return a set, get number of rows.
-	 * Otherwise, stop at one row.
-	 */
-	nr = nrows(rval);
-
-	/* initialize our tuplestore */
-	tupstore = TUPLESTORE_BEGIN_HEAP;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	values = (char **) palloc(nc * sizeof(char *));
-
-	PROTECT(obj =  coerce_to_char(rval));
-	for(i = 0; i < nr; i++)
-	{
-		for (j = 0; j < nc; j++)
-		{
-			if (STRING_ELT(obj, (j * nr) + i) != NA_STRING)
-				values[j] = (char *) CHAR(STRING_ELT(obj, (j * nr) + i));
-			else
-				values[j] = (char *) NULL;
-		}
-
-		/* construct the tuple */
-		tuple = BuildTupleFromCStrings(attinmeta, values);
-
-		/* switch to appropriate context while storing the tuple */
-		oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-		/* now store it */
-		tuplestore_puttuple(tupstore, tuple);
-
-		/* now reset the context */
-		MemoryContextSwitchTo(oldcontext);
-	}
-	UNPROTECT(1);
-
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-	tuplestore_donestoring(tupstore);
-	MemoryContextSwitchTo(oldcontext);
-
-	return tupstore;
-}
-
-static Tuplestorestate *
-get_generic_tuplestore(SEXP rval,
-					 plr_function *function,
-					 AttInMetadata *attinmeta,
-					 MemoryContext per_query_ctx)
-{
-	Tuplestorestate	   *tupstore;
-	char			  **values;
-	HeapTuple			tuple;
-	MemoryContext		oldcontext;
-	int					nr;
-	int					nc = 1;
-	SEXP				obj;
-	int					i;
-
-	/* switch to appropriate context to create the tuple store */
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-	/*
-	 * If we return a set, get number of rows.
-	 * Otherwise, stop at one row.
-	 */
-	nr = length(rval);
-
-	/* initialize our tuplestore */
-	tupstore = TUPLESTORE_BEGIN_HEAP;
-
-	MemoryContextSwitchTo(oldcontext);
-
-	values = (char **) palloc(nc * sizeof(char *));
-	PROTECT(obj = coerce_to_char(rval));
-
-	for(i = 0; i < nr; i++)
-	{
-		if (STRING_ELT(obj, i) != NA_STRING)
-			values[0] = (char *) CHAR(STRING_ELT(obj, i));
-		else
-			values[0] = (char *) NULL;
-
-		/* construct the tuple */
-		tuple = BuildTupleFromCStrings(attinmeta, values);
-
-		/* switch to appropriate context while storing the tuple */
-		oldcontext = MemoryContextSwitchTo(per_query_ctx);
-
-		/* now store it */
-		tuplestore_puttuple(tupstore, tuple);
-
-		/* now reset the context */
-		MemoryContextSwitchTo(oldcontext);
-	}
-	UNPROTECT(1);
-
-	oldcontext = MemoryContextSwitchTo(per_query_ctx);
-	tuplestore_donestoring(tupstore);
-	MemoryContextSwitchTo(oldcontext);
-
-	return tupstore;
+	pfree(values);
+	pfree(isnull);
 }
 
 static SEXP

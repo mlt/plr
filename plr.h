@@ -103,9 +103,11 @@
  * version 1.9.0 results in:
  *   (1 * 65536) + (9 * 256) + (0 * 1) == 67840
  */
-#if (R_VERSION >= 132096) /* R_VERSION >= 2.4.0 */
-#include "Rembedded.h"
+
+#if (R_VERSION < R_Version(3,5,0))
+#error "PL/R requires R version at least 3.5.0"
 #endif
+#include "Rembedded.h"
 #if !defined(WIN32) && !defined(WIN64)
 #include "Rinterface.h"
 #else
@@ -113,9 +115,6 @@ extern int R_SignalHandlers;
 #endif
 #include "Rinternals.h"
 #include "Rdefines.h"
-#if (R_VERSION < 133120) /* R_VERSION < 2.8.0 */
-#include "Rdevices.h"
-#endif
 
 /* Restore the Postgres headers */
 
@@ -134,9 +133,6 @@ extern int R_SignalHandlers;
 #ifndef KillAllDevices
 #define KillAllDevices					Rf_KillAllDevices
 #endif
-
-/* for some reason this is not in any R header files, it is locally defined */
-#define INTEGER_ELT(x,__i__)    INTEGER(x)[__i__]
 
 #ifndef R_HOME_DEFAULT
 #define R_HOME_DEFAULT ""
@@ -162,7 +158,18 @@ extern int R_SignalHandlers;
 #else 
 #define TUPLE_DESC_ATTR(tupdesc,i) tupdesc->attrs[i] 
 #endif
-		
+
+/* PostgreSQL < 10 seems to lack that in server/c.h */
+#ifndef likely
+#if __GNUC__ >= 3
+#define likely(x)	__builtin_expect((x) != 0, 1)
+#define unlikely(x) __builtin_expect((x) != 0, 0)
+#else
+#define likely(x)	((x) != 0)
+#define unlikely(x) ((x) != 0)
+#endif
+#endif
+
 #ifdef DEBUGPROTECT
 #undef PROTECT
 extern SEXP pg_protect(SEXP s, char *fn, int ln);
@@ -190,20 +197,6 @@ extern void pg_unprotect(int n, char *fn, int ln);
 
 #define NEXT_STR_ELEMENT	" %s"
 
-#if (R_VERSION < 67840) /* R_VERSION < 1.9.0 */
-#define SET_COLUMN_NAMES \
-	do { \
-		int i; \
-		char *names_buf; \
-		names_buf = SPI_fname(tupdesc, j + 1); \
-		for (i = 0; i < strlen(names_buf); i++) { \
-			if (names_buf[i] == '_') \
-				names_buf[i] = '.'; \
-		} \
-		SET_STRING_ELT(names, df_colnum, mkChar(names_buf)); \
-		pfree(names_buf); \
-	} while (0)
-#else /* R_VERSION >= 1.9.0 */
 #define SET_COLUMN_NAMES \
 	do { \
 		char *names_buf; \
@@ -211,43 +204,9 @@ extern void pg_unprotect(int n, char *fn, int ln);
 		SET_STRING_ELT(names, df_colnum, mkChar(names_buf)); \
 		pfree(names_buf); \
 	} while (0)
-#endif
-
-#if (R_VERSION < 67584) /* R_VERSION < 1.8.0 */
-/*
- * See the non-exported header file ${R_HOME}/src/include/Parse.h
- */
-extern SEXP R_ParseVector(SEXP, int, int *);
-#define PARSE_NULL			0
-#define PARSE_OK			1
-#define PARSE_INCOMPLETE	2
-#define PARSE_ERROR			3
-#define PARSE_EOF			4
-
-#define R_PARSEVECTOR(a_, b_, c_)		R_ParseVector(a_, b_, c_)
-
-/*
- * See the non-exported header file ${R_HOME}/src/include/Defn.h
- */
-extern void R_PreserveObject(SEXP);
-extern void R_ReleaseObject(SEXP);
-
-/* in main.c */
-extern void R_dot_Last(void);
-
-/* in memory.c */
-extern void R_RunExitFinalizers(void);
-
-#else /* R_VERSION >= 1.8.0 */
 
 #include "R_ext/Parse.h"
-
-#if (R_VERSION >= 132352) /* R_VERSION >= 2.5.0 */
 #define R_PARSEVECTOR(a_, b_, c_)		R_ParseVector(a_, b_, (ParseStatus *) c_, R_NilValue)
-#else /* R_VERSION < 2.5.0 */
-#define R_PARSEVECTOR(a_, b_, c_)		R_ParseVector(a_, b_, (ParseStatus *) c_)
-#endif /* R_VERSION >= 2.5.0 */
-#endif /* R_VERSION >= 1.8.0 */
 
 /* convert C string to text pointer */
 #define PG_TEXT_GET_STR(textp_) \
@@ -524,7 +483,7 @@ extern SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* 
 extern SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
 extern Datum r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
 extern Datum get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull);
-extern Datum get_scalar_datum(SEXP rval, Oid result_typ, FmgrInfo result_in_func, bool *isnull);
+extern Datum get_scalar_datum(SEXP rval, Oid result_typ, FmgrInfo result_in_func, bool *isnull, int idx);
 
 /* Postgres support functions installed into the R interpreter */
 PGDLLEXPORT void throw_pg_log(int* elevel, const char **msg);
