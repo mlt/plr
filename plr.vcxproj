@@ -23,7 +23,7 @@
     <ProjectGuid>{CC739A29-855A-4FB0-B859-ECD0EBC538C5}</ProjectGuid>
     <Keyword>Win32Proj</Keyword>
     <RootNamespace>plr</RootNamespace>
-    <PlatformToolset>v140</PlatformToolset>
+    <PlatformToolset>v141</PlatformToolset>
     <ConfigurationType>DynamicLibrary</ConfigurationType>
     <CustomBuildBeforeTargets>Link</CustomBuildBeforeTargets>
     <WholeProgramOptimization Condition="'$(Configuration)'=='Release'">true</WholeProgramOptimization>
@@ -33,10 +33,10 @@
     <pf Condition="$(Platform)=='x64'">$(ProgramW6432)</pf>
   </PropertyGroup>
   <PropertyGroup Label="UserMacros">
-    <pgversion Condition="$(pgversion) == ''">9.6</pgversion>
+    <pgversion Condition="$(pgversion) == ''">11</pgversion>
     <mingw Condition="$(mingw) == ''">C:\RTools\mingw_</mingw>
     <pgroot Condition="$(pgroot)==''">$(pf)\PostgreSQL\$(pgversion)</pgroot>
-    <rversion Condition="$(rversion)==''">3.5.1</rversion>
+    <rversion Condition="$(rversion)==''">3.6.0</rversion>
     <r_home Condition="$(R_HOME)==''">C:\Program Files\R\R-$(rversion)</r_home>
     <sed Condition="$(sed)==''">$(mingw)\..\bin\sed</sed>
   </PropertyGroup>
@@ -67,8 +67,8 @@
       <StringPooling>true</StringPooling>
     </ClCompile>
     <ClCompile Condition="$(Configuration)=='Debug'">
+      <PreprocessorDefinitions>USE_ASSERT_CHECKING;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <Optimization>Disabled</Optimization>
-      <MinimalRebuild>true</MinimalRebuild>
       <BrowseInformation Condition="$(CI)==''">true</BrowseInformation>
       <RuntimeLibrary>MultiThreadedDebugDLL</RuntimeLibrary>
       <FunctionLevelLinking>true</FunctionLevelLinking>
