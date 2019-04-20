@@ -385,13 +385,13 @@ extern void R_RunExitFinalizers(void);
 		HeapTupleHeaderSetTypMod(dtrigtup, tupdesc->tdtypmod); \
 		SET_ARG(PointerGetDatum(dtrigtup),false,7); \
 	} while (0)
-#define CONVERT_TUPLE_TO_DATAFRAME(t) \
+#define CONVERT_TUPLE_TO_DATAFRAME(tt) \
 	do { \
 		Oid			tupType; \
 		int32		tupTypmod; \
 		TupleDesc	tupdesc; \
 		HeapTuple	tuple = palloc(sizeof(HeapTupleData)); \
-		HeapTupleHeader	tuple_hdr = DatumGetHeapTupleHeader(t); \
+		HeapTupleHeader	tuple_hdr = DatumGetHeapTupleHeader(tt); \
 		tupType = HeapTupleHeaderGetTypeId(tuple_hdr); \
 		tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr); \
 		tupdesc = lookup_rowtype_tupdesc(tupType, tupTypmod); \
@@ -537,6 +537,7 @@ PGDLLEXPORT SEXP call_r_func(SEXP fun, SEXP rargs, SEXP rho);
 PGDLLEXPORT SEXP pg_scalar_get_r(Datum dvalue, Oid arg_typid, FmgrInfo arg_out_func);
 PGDLLEXPORT SEXP pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typbyval, char typalign);
 PGDLLEXPORT SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function);
+PGDLLEXPORT SEXP pg_window_frame_get_r_frame(WindowObject winobj, int argno, plr_function* function);
 PGDLLEXPORT SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
 PGDLLEXPORT Datum r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
 PGDLLEXPORT Datum get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull);

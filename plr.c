@@ -1602,7 +1602,7 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 			else if (function->arg_is_rel[i])
 			{
 				/* for tuple args, convert to a one row data.frame */
-				CONVERT_TUPLE_TO_DATAFRAME(arg[i]);
+				CONVERT_TUPLE_TO_DATAFRAME(GET_ARG_VALUE(i));
 			}
 			else if (function->arg_elem[i] == InvalidOid)
 			{
@@ -1684,63 +1684,42 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 
 		if (plr_is_unbound_frame(winobj))
 		{
-
-			WinGetFrameData(winobj, i, dvalues, isnulls, &numels, &has_nulls);
-
-			if (!function->arg_is_rel[i])
+			SEXP lst;
+			if (0 == current_row)
 			{
-				datum_typid = function->arg_typid[i];
-				datum_out_func = function->arg_out_func[i];
-				datum_typbyval = function->arg_typbyval[i];
-				PROTECT(el = pg_datum_array_get_r(dvalues, isnulls, numels, has_nulls,
-											  datum_typid, datum_out_func, datum_typbyval));
-
+				lst = PROTECT(allocVector(VECSXP, function->nargs));
+				for (i = 0; i < function->nargs; i++, t = CDR(t))
+				{
+					el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
+						R_NilValue : */ (function->arg_is_rel[i] ? pg_window_frame_get_r_frame : pg_window_frame_get_r)(winobj, i, function);
+					SET_VECTOR_ELT(lst, i, el);
+					SETCAR(t, el);
+				}
+				defineVar(install(PLR_WINDOW_FRAME_NAME), lst, rho);
+				UNPROTECT(1);
 			}
 			else
 			{
-				/* for tuple args, convert to a multi-row data.frame */
-				int		  tpl;
-				int32		tupTypmod;
-				TupleDesc	tupdesc;
-				HeapTupleHeader tuple_hdr;
-				HeapTupleData  *tupledata = palloc0(numels * sizeof(HeapTupleData));
-				HeapTuple	  *tuples = palloc0(numels * sizeof(HeapTuple));
-				for (tpl = 0; tpl < numels; tpl++)
+				lst = findVar(install(PLR_WINDOW_FRAME_NAME), rho);
+				if (R_UnboundValue == lst)
+					elog(ERROR, "%s list with window frame data cannot be found in R_GlobalEnv", PLR_WINDOW_FRAME_NAME);
+				for (i = 0; i < function->nargs; i++, t = CDR(t))
 				{
-					tuple_hdr = DatumGetHeapTupleHeader(dvalues[tpl]);
-					tupledata[tpl].t_len = HeapTupleHeaderGetDatumLength(tuple_hdr);
-					ItemPointerSetInvalid(&tupledata[tpl].t_self);
-					tupledata[tpl].t_tableOid = InvalidOid;
-					tupledata[tpl].t_data = tuple_hdr;
-					tuples[tpl] = &tupledata[tpl];
+					el = VECTOR_ELT(lst, i);
+					SETCAR(t, el);
 				}
-				/* Get tupdesc from first tuple **assuming all are the same type** */
-				tuple_hdr = DatumGetHeapTupleHeader(dvalues[0]);
-				datum_typid = HeapTupleHeaderGetTypeId(tuple_hdr);
-				tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr);
-				tupdesc = lookup_rowtype_tupdesc(datum_typid, tupTypmod);
-				PROTECT(el = pg_tuple_get_r_frame(numels, tuples, tupdesc));
-				ReleaseTupleDesc(tupdesc);
-				pfree(tuples);
-				pfree(tupledata);
 			}
-			/*
-			 * We already set function->nargs arguments
-			 * so we must start with a function->nargs
-			 */
-			SETCAR(t, el);
-			t = CDR(t);
-
-			UNPROTECT(1);
 		}
 		else
 			for (i = 0; i < function->nargs; i++, t = CDR(t))
 			{
-				el = get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
-					R_NilValue : pg_window_frame_get_r(winobj, i, function);
+				el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
+					R_NilValue : */ (function->arg_is_rel[i] ? pg_window_frame_get_r_frame : pg_window_frame_get_r)(winobj, i, function);
+
 				SETCAR(t, el);
 			}
 
+		// below only works if last el <> R_NilValue (see commented out above)
 		numels = function->nargs > 0 ? GET_LENGTH(el) : 0;
 
 		/* fnumrows */

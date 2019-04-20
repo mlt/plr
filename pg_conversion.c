@@ -410,6 +410,188 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 
 	return result;
 }
+
+/*
+ * Given an array of pg tuples, convert to an R list
+ * the created object is not quite actually a data.frame
+ */
+SEXP
+pg_window_frame_get_r_frame(WindowObject winobj, int argno, plr_function* function)
+{
+	int		 nc, nc_non_dropped = 0, df_colnum = 0, j;
+	Oid		 element_type, typelem;
+	SEXP		names, row_names;
+	char		buf[256];
+	SEXP		result, *fldvecs;
+	Oid		 tupType;
+	int32	   tupTypmod;
+	TupleDesc   tupdesc;
+	Datum	   dvalue;
+	HeapTuple   tuple;
+	HeapTupleHeader tuple_hdr;
+	bool		isnull;
+	bool		isout = false;
+	bool		isrel = function->arg_is_rel[argno];
+	int64	   i, numels, nr = WinGetPartitionRowCount(winobj);
+
+	if (isrel == false || nr < 1)
+		return R_NilValue;
+
+	// Get current row for starters, set mark
+	dvalue = WinGetFuncArgInFrame(winobj, argno, 0, WINDOW_SEEK_HEAD,
+								  true, &isnull, &isout);
+	if (isout)
+		return R_NilValue;
+
+	/* Count non-dropped attributes so we can later ignore the dropped ones */
+	tuple_hdr = DatumGetHeapTupleHeader(dvalue);
+	tupType   = HeapTupleHeaderGetTypeId(tuple_hdr);
+	tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr);
+	tupdesc   = lookup_rowtype_tupdesc(tupType, tupTypmod);
+	nc		= tupdesc->natts;
+	for (j = 0; j < nc; j++)
+	{
+		if (!TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+			nc_non_dropped++;
+	}
+
+	/*
+	 * Allocate the data.frame initially as a list,
+	 * and also allocate a names vector for the column names
+	 * and an array of pointers to vectors for each dataframe col
+	 */
+	PROTECT(result = NEW_LIST(nc_non_dropped));
+	PROTECT(names = NEW_CHARACTER(nc_non_dropped));
+	fldvecs = palloc(nc_non_dropped * sizeof(SEXP));
+
+	for (numels = 0; ; numels++)
+	{
+		if (numels > 0)
+		{
+		   // Update dvalue to next row's tuple
+			dvalue = WinGetFuncArgInFrame(winobj, argno, numels, WINDOW_SEEK_HEAD, false, &isnull, &isout);
+			if (isout)
+				break;  // past end of frame
+		}
+		if (!isnull)
+		{
+			// Allocate new heaptuple for this row and set contents
+			tuple = palloc(sizeof(HeapTupleData));
+			tuple_hdr = DatumGetHeapTupleHeader(dvalue);
+			tuple->t_len = HeapTupleHeaderGetDatumLength(tuple_hdr);
+			ItemPointerSetInvalid(&(tuple->t_self));
+			tuple->t_tableOid = InvalidOid;
+			tuple->t_data = tuple_hdr;
+		}
+		for (df_colnum = 0, j = 0; j < nc; j++)
+		{
+			/* ignore dropped attributes */
+			if (TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+				continue;
+
+			/* set column name */
+			if (numels == 0)
+				SET_COLUMN_NAMES;
+
+			/* get column datatype oid */
+			element_type = SPI_gettypeid(tupdesc, j + 1);
+
+			/*
+			 * Check to see if it is an array type. get_element_type will return
+			 * InvalidOid instead of actual element type if the type is not a
+			 * varlena array.
+			 */
+			typelem = get_element_type(element_type);
+
+			if (numels == 0)
+			{
+				/* get new vector of the appropriate type and length */
+				if (typelem == InvalidOid)
+					PROTECT(fldvecs[df_colnum] = get_r_vector(element_type, nr));
+				else
+					PROTECT(fldvecs[df_colnum] = NEW_LIST(nr));
+			}
+
+			if (typelem == InvalidOid)
+			{
+				/* not an array type */
+				char	   *value;
+
+				value = isnull ? NULL : SPI_getvalue(tuple, tupdesc, j + 1);
+				/*
+				* Note that pg_get_one_r() replaces NULL values with
+				* the NA value appropriate for the data type.
+				*/
+				pg_get_one_r(value, element_type, &fldvecs[df_colnum], numels);
+			}
+			else
+			{
+				/* array type */
+				Datum	   value;
+				bool		isvaluenull;
+				SEXP		fldvec_elem;
+				int16	   typlen;
+				bool		typbyval;
+				char		typdelim;
+				char		typalign;
+				Oid		 typoutput, typioparam;
+				FmgrInfo	outputproc;
+
+				if (!isnull)
+				{
+					get_type_io_data(typelem, IOFunc_output, &typlen, &typbyval, &typalign, &typdelim, &typioparam, &typoutput);
+					fmgr_info(typoutput, &outputproc);
+					value = SPI_getbinval(tuple, tupdesc, j + 1, &isvaluenull);
+
+					if (!isvaluenull)
+						PROTECT(fldvec_elem = pg_array_get_r(value, outputproc, typlen, typbyval, typalign));
+					else
+						PROTECT(fldvec_elem = R_NilValue);
+
+					SET_VECTOR_ELT(fldvecs[df_colnum], numels, fldvec_elem);
+					UNPROTECT(1);
+				}
+				else
+				{
+					SET_VECTOR_ELT(fldvecs[df_colnum], numels, R_NilValue);
+				}
+			}
+			df_colnum++;
+		}
+		if (!isnull)
+			pfree(tuple);
+	}
+
+	/* Create data.frame from fldvectors */
+	for (df_colnum = 0, j = 0; j < nc; j++)
+	{
+		if (TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+			continue;
+		if (numels != nr)
+			SET_LENGTH(fldvecs[df_colnum], numels);
+		SET_VECTOR_ELT(result, df_colnum, fldvecs[df_colnum]);
+		df_colnum++;
+	}
+	UNPROTECT(df_colnum);
+
+	/* attach the column names */
+	setAttrib(result, R_NamesSymbol, names);
+
+	/* attach row names - basically just the row number, zero based */
+	PROTECT(row_names = allocVector(STRSXP, numels));
+	for (i = 0; i < numels; i++)
+	{
+		sprintf(buf, "%ld", i + 1);
+		SET_STRING_ELT(row_names, i, COPY_TO_USER_STRING(buf));
+	}
+	setAttrib(result, R_RowNamesSymbol, row_names);
+
+	/* finally, tell R we are a data.frame */
+	setAttrib(result, R_ClassSymbol, mkString("data.frame"));
+	ReleaseTupleDesc(tupdesc);
+	UNPROTECT(3);
+	return result;
+}
 #endif
 
 /*
