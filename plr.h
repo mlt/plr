@@ -421,6 +421,20 @@ typedef struct plr_func_hashkey
 	Oid		argtypes[FUNC_MAX_ARGS];
 } plr_func_hashkey;
 
+/* element conversion prototype */
+typedef Datum (*get_datum_type)(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull);
+
+typedef struct plr_result
+{
+	int					natts;
+	Oid				   *typid;
+	Oid				   *elem_typid;
+	FmgrInfo		   *elem_in_func;
+	int16			   *elem_typlen;
+	bool			   *elem_typbyval;
+	char			   *elem_typalign;
+	get_datum_type	   *get_datum;
+} plr_result;
 
 /* The information we cache about loaded procedures */
 typedef struct plr_function
@@ -430,13 +444,7 @@ typedef struct plr_function
 	ItemPointerData		fn_tid;
 	plr_func_hashkey   *fn_hashkey; /* back-link to hashtable key */
 	bool				lanpltrusted;
-	int					result_natts;
-	Oid				   *result_fld_typid;
-	Oid				   *result_fld_elem_typid;
-	FmgrInfo		   *result_fld_elem_in_func;
-	int16			   *result_fld_elem_typlen;
-	bool			   *result_fld_elem_typbyval;
-	char			   *result_fld_elem_typalign;
+	plr_result			result;
 	int					nargs;
 	Oid					arg_typid[FUNC_MAX_ARGS];
 	bool				arg_typbyval[FUNC_MAX_ARGS];
@@ -481,9 +489,10 @@ extern SEXP pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typ
 extern SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function);
 #endif
 extern SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
-extern Datum r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
-extern Datum get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull);
-extern Datum get_scalar_datum(SEXP rval, Oid result_typ, FmgrInfo result_in_func, bool *isnull, int idx);
+extern Datum r_get_pg(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
+extern Datum get_datum(SEXP rval, plr_result *result, int col, bool *isnull);
+extern Datum get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx);
+extern get_datum_type get_mapper(int sxp_type, Oid typid);
 
 /* Postgres support functions installed into the R interpreter */
 PGDLLEXPORT void throw_pg_log(int* elevel, const char **msg);

@@ -203,7 +203,9 @@ create or replace function test_dta2() returns text[] as 'as.data.frame(data.fra
 select test_dta2();
 
 -- generates expected error
-create or replace function test_dia1() returns int[] as 'as.data.frame(array(letters[1:10], c(2,5)))' language 'plr';
+create or replace function test_dia1() returns int[] as $$
+  as.data.frame(array(letters[1:10], c(2,5)), stringsAsFactors=FALSE)
+$$ language 'plr';
 create or replace function test_dia1_wrap() returns text as $body$
 begin
   select test_dia1() as error;

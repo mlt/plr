@@ -37,21 +37,15 @@
 static void pg_get_one_r(char *value, Oid arg_out_fn_oid, SEXP *obj,
 																int elnum);
 static SEXP get_r_vector(Oid typtype, int64 numels);
-static Datum get_trigger_tuple(SEXP rval, plr_function *function,
-									FunctionCallInfo fcinfo, bool *isnull);
-static Datum get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
-static Datum get_simple_array_datum(SEXP rval, Oid typelem, bool *isnull);
-static Datum get_array_datum(SEXP rval, plr_function *function, int col, bool *isnull);
-static inline Datum get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool *isnull);
-static Datum get_frame_array_datum(SEXP rval, plr_function *function, int col,
-																bool *isnull);
-static Datum get_md_array_datum(SEXP rval, int ndims, plr_function *function, int col,
-																bool *isnull);
-static Datum get_generic_array_datum(SEXP rval, plr_function *function, int col,
-																bool *isnull);
-static void get_tuplestore_imp(SEXP rval, plr_function *function, TupleDesc tupdesc, Tuplestorestate *tupstore);
+static Datum get_trigger_tuple(SEXP rval, FunctionCallInfo fcinfo, bool *isnull);
+static Datum get_tuplestore(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
+static Datum get_array_datum(SEXP rval, plr_result *result, int col);
+static inline Datum get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull);
+static Datum get_frame_array_datum(SEXP rval, plr_result *result, int col);
+static Datum get_md_array_datum(SEXP rval, plr_result *result, int col);
+static void get_tuplestore_imp(SEXP rval, plr_result *result, TupleDesc tupdesc, Tuplestorestate *tupstore);
 static SEXP coerce_to_char(SEXP rval);
-static Datum r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo);
+static Datum r_get_tuple(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
 
 extern char *last_R_error_msg;
 
@@ -631,33 +625,24 @@ pg_get_one_r(char *value, Oid typtype, SEXP *obj, int elnum)
  * given an R value, convert to its pg representation
  */
 Datum
-r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
+r_get_pg(SEXP rval, plr_result *result, FunctionCallInfo fcinfo)
 {
 	bool	isnull = false;
-	Datum	result;
+	Datum	dvalue;
 
 	if (CALLED_AS_TRIGGER(fcinfo))
-		result = get_trigger_tuple(rval, function, fcinfo, &isnull);
+		dvalue = get_trigger_tuple(rval, fcinfo, &isnull);
 	else if (fcinfo->flinfo->fn_retset)
-		return get_tuplestore(rval, function, fcinfo);
-	else if (function->result_natts > 1)
-		return r_get_tuple(rval, function, fcinfo);
+		return get_tuplestore(rval, result, fcinfo);
+	else if (result->natts > 1)
+		return r_get_tuple(rval, result, fcinfo);
 	else
-	{
-		/* short circuit if return value is Null */
-		if (rval == R_NilValue || isNull(rval))	/* probably redundant */
-			PG_RETURN_NULL();
-
-		if (function->result_fld_elem_typid[0] == function->result_fld_typid[0])
-			result = get_scalar_datum(rval, function->result_fld_typid[0], function->result_fld_elem_in_func[0], &isnull, 0);
-		else
-			result = get_array_datum(rval, function, 0, &isnull);
-	}
+		dvalue = get_datum(rval, result, 0, &isnull);
 
 	if (isnull)
 		fcinfo->isnull = true;
 
-	return result;
+	return dvalue;
 }
 
 /*
@@ -667,7 +652,7 @@ r_get_pg(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
  * This is used to return a single RECORD (not SETOF)
  */
 Datum
-r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
+r_get_tuple(SEXP rval, plr_result *result, FunctionCallInfo fcinfo)
 {
 	Oid			oid;
 	TupleDesc	tupdesc;
@@ -682,7 +667,7 @@ r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 	if (TYPEFUNC_COMPOSITE != get_call_result_type(fcinfo, &oid, &tupdesc))
 		elog(ERROR, "return type must be a row type");
 
-	min_length = Min(function->result_natts, length(rval));
+	min_length = Min(result->natts, length(rval));
 
 	//if (tupdesc->natts != length(rval))
 	//	elog(ERROR, "same length expected");
@@ -695,10 +680,14 @@ r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 	for (i = 0; i < min_length; i++)
 	{
 		SEXP el = VECTOR_ELT(rval, i);
-		if (function->result_fld_typid[i] != function->result_fld_elem_typid[i])
-			values[i] = get_array_datum(el, function, i, isnull + i);
+
+		if (result->typid[i] == result->elem_typid[i])
+		{
+			result->get_datum[i] = get_mapper(TYPEOF(el), result->elem_typid[i]);
+			values[i] = get_scalar_datum(el, result, i, isnull + i, 0);
+		}
 		else
-			values[i] = get_scalar_datum(el, function->result_fld_elem_typid[i], function->result_fld_elem_in_func[i], isnull + i);
+			values[i] = get_array_datum(el, result, i);
 	}
 
 	tuple = heap_form_tuple(tupdesc, values, isnull);
@@ -708,13 +697,13 @@ r_get_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 }
 
 /*
- * Similar to r_get_pg, given an R value, convert to its pg representation
- * Other than scalar, currently only prepared to be used with simple 1D vector
+ * Given an R value, convert to its pg representation
+ * for non-SRF and non-composite types
  */
 Datum
-get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull)
+get_datum(SEXP rval, plr_result *result, int col, bool *isnull)
 {
-	Datum	result;
+	Datum	dvalue;
 
 	/* short circuit if return value is Null */
 	if (rval == R_NilValue || isNull(rval))	/* probably redundant */
@@ -723,16 +712,20 @@ get_datum(SEXP rval, Oid typid, Oid typelem, FmgrInfo in_func, bool *isnull)
 		return (Datum) 0;
 	}
 
-	if (typelem == InvalidOid)
-		result = get_scalar_datum(rval, typid, in_func, isnull, 0);
-	else
-		result = get_simple_array_datum(rval, typelem, isnull);
 
-	return result;
+	if (result->elem_typid[col] == result->typid[col])
+	{
+		result->get_datum[col] = get_mapper(TYPEOF(rval), result->elem_typid[col]);
+		dvalue = get_scalar_datum(rval, result, col, isnull, 0);
+	}
+	else
+		dvalue = get_array_datum(rval, result, col);
+
+	return dvalue;
 }
 
 static Datum
-get_trigger_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bool *isnull)
+get_trigger_tuple(SEXP rval, FunctionCallInfo fcinfo, bool *isnull)
 {
 	TriggerData	   *trigdata = (TriggerData *) fcinfo->context;
 	TupleDesc		tupdesc = trigdata->tg_relation->rd_att;
@@ -913,7 +906,7 @@ get_trigger_tuple(SEXP rval, plr_function *function, FunctionCallInfo fcinfo, bo
 }
 
 static Datum
-get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
+get_tuplestore(SEXP rval, plr_result *result, FunctionCallInfo fcinfo)
 {
 	ReturnSetInfo	   *rsinfo = (ReturnSetInfo *) fcinfo->resultinfo;
 	Tuplestorestate	   *tupstore;
@@ -943,7 +936,7 @@ get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 	rsinfo->returnMode = SFRM_Materialize;
 	rsinfo->setResult = tupstore;
 	rsinfo->setDesc = tupdesc;
-	get_tuplestore_imp(rval, function, tupdesc, tupstore);
+	get_tuplestore_imp(rval, result, tupdesc, tupstore);
 
 	/*
 	 * SFRM_Materialize mode expects us to return a NULL Datum. The actual
@@ -957,7 +950,145 @@ get_tuplestore(SEXP rval, plr_function *function, FunctionCallInfo fcinfo)
 }
 
 Datum
-get_scalar_datum(SEXP rval, Oid result_typid, FmgrInfo result_in_func, bool *isnull, int idx)
+intsxp_get_int2(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const int el = INTEGER_ELT(rval, idx);
+	*isnull = NA_INTEGER == el;
+	return Int16GetDatum((int16)el);
+}
+
+Datum
+intsxp_get_int4(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const int el = INTEGER_ELT(rval, idx);
+	*isnull = NA_INTEGER == el;
+	return Int32GetDatum(el);
+}
+
+Datum
+realsxp_get_float4(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const double el = REAL_ELT(rval, idx);
+	*isnull = ISNA(el);
+	return Float4GetDatum((float4)el);
+}
+
+Datum
+realsxp_get_float8(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const double el = REAL_ELT(rval, idx);
+	*isnull = ISNA(el);
+	return Float8GetDatum(el);
+}
+
+Datum
+realsxp_get_int8(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const double el = REAL_ELT(rval, idx);
+	*isnull = ISNA(el);
+	return Int64GetDatum((int64)el);
+}
+
+Datum
+realsxp_get_numeric(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	const double el = REAL_ELT(rval, idx);
+	*isnull = ISNA(el);
+	return DirectFunctionCall1(float8_numeric, Float8GetDatum((double)el));
+}
+
+Datum
+get_bytea(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
+{
+	SEXP		obj;
+	int			len, rsize, status;
+	bytea	   *result;
+	char	   *rptr;
+	const char *value = NULL;
+
+	PROTECT(obj = R_tryEval(lang3(install("serialize"), rval, R_NilValue), R_GlobalEnv, &status));
+	if (status != 0)
+	{
+		if (last_R_error_msg)
+			ereport(ERROR,
+			(errcode(ERRCODE_DATA_EXCEPTION),
+			 errmsg("R interpreter expression evaluation error"),
+			 errdetail("%s", last_R_error_msg)));
+		else
+			ereport(ERROR,
+			(errcode(ERRCODE_DATA_EXCEPTION),
+			 errmsg("R interpreter expression evaluation error"),
+			 errdetail("R expression evaluation error caught in \"serialize\".")));
+	}
+	len = LENGTH(obj);
+
+	rsize = VARHDRSZ + len;
+	result = (bytea *)palloc(rsize);
+	SET_VARSIZE(result, rsize);
+	rptr = VARDATA(result);
+	memcpy(rptr, (char *)RAW(obj), rsize - VARHDRSZ);
+
+	UNPROTECT(1);
+
+	*isnull = false;
+	return PointerGetDatum(result);
+}
+
+get_datum_type
+get_mapper(int sxp_type, Oid typid)
+{
+	switch (typid)
+	{
+		case BOOLOID:
+		case INT4OID:
+			switch (sxp_type)
+			{
+				case LGLSXP:
+				case INTSXP:
+					return intsxp_get_int4;
+			};
+			break;
+		case INT8OID:
+			switch (sxp_type)
+			{
+				case REALSXP:
+					return realsxp_get_int8;
+			}
+		case INT2OID:
+			switch (sxp_type)
+			{
+				case INTSXP:
+					return intsxp_get_int2;
+			}
+		case FLOAT4OID:
+			switch (sxp_type)
+			{
+				case REALSXP:
+					return realsxp_get_float4;
+			}
+			break;
+		case FLOAT8OID:
+			switch (sxp_type)
+			{
+				case REALSXP:
+					return realsxp_get_float8;
+			}
+			break;
+		case NUMERICOID:
+			switch (sxp_type)
+			{
+				case REALSXP:
+					return realsxp_get_numeric;
+			}
+		case BYTEAOID:
+			return get_bytea;
+	};
+
+	return get_scalar_datum_through_text;
+}
+
+Datum
+get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx)
 {
 	/*
 	 * passing a null into something like
@@ -970,118 +1101,24 @@ get_scalar_datum(SEXP rval, Oid result_typid, FmgrInfo result_in_func, bool *isn
 		return (Datum)0;
 	}
 
-	/*
-	 * Element type is zero, we don't have an array, so, unless not a direct match,
-	 * coerce to string and take the first element as a scalar
-	 *
-	 * Exception: if result type is BYTEA, we want to return the whole
-	 * object in serialized form
-	 */
-	switch (result_typid)
-	{
-		case BOOLOID:
-		case INT4OID:
-			switch (TYPEOF(rval))
-			{
-				case LGLSXP:
-				case INTSXP:
-					*isnull = NA_INTEGER == INTEGER_ELT(rval, idx);
-					return Int32GetDatum(INTEGER_ELT(rval, idx));
-			};
-			break;
-		case FLOAT4OID:
-			switch (TYPEOF(rval))
-			{
-				case REALSXP:
-					*isnull = ISNA(REAL_ELT(rval, idx));
-					return Float4GetDatum((float4)REAL_ELT(rval, idx));
+	Assert(result->get_datum[col]);
 
-			}
-			break;
-		case FLOAT8OID:
-			switch (TYPEOF(rval))
-			{
-				case REALSXP:
-					*isnull = ISNA(REAL_ELT(rval, idx));
-					return Float8GetDatum(REAL_ELT(rval, idx));
-
-			}
-			break;
-		case BYTEAOID:
-		{
-			SEXP		obj;
-			int			len, rsize, status;
-			bytea	   *result;
-			char	   *rptr;
-			const char *value = NULL;
-
-			PROTECT(obj = R_tryEval(lang3(install("serialize"), rval, R_NilValue), R_GlobalEnv, &status));
-			if (status != 0)
-			{
-				if (last_R_error_msg)
-					ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("R interpreter expression evaluation error"),
-					 errdetail("%s", last_R_error_msg)));
-				else
-					ereport(ERROR,
-					(errcode(ERRCODE_DATA_EXCEPTION),
-					 errmsg("R interpreter expression evaluation error"),
-					 errdetail("R expression evaluation error caught in \"serialize\".")));
-			}
-			len = LENGTH(obj);
-
-			rsize = VARHDRSZ + len;
-			result = (bytea *)palloc(rsize);
-			SET_VARSIZE(result, rsize);
-			rptr = VARDATA(result);
-			memcpy(rptr, (char *)RAW(obj), rsize - VARHDRSZ);
-
-			UNPROTECT(1);
-
-			*isnull = false;
-			return PointerGetDatum(result);
-		}
-	};
-
-	return get_scalar_datum_through_text(rval, idx, result_in_func, isnull);
+	return (*result->get_datum[col]) (rval, idx, result->elem_in_func + col, isnull);
 }
 
 static Datum
-get_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
+get_array_datum(SEXP rval, plr_result *result, int col)
 {
-	SEXP	rdims;
-	int		ndims;
-	int		objlen = length(rval);
+	if (isFrame(rval))
+		return get_frame_array_datum(rval, result, col);
 
-	if (objlen > 0)
-	{
-		/* two supported special cases */
-		if (isFrame(rval))
-			return get_frame_array_datum(rval, function,  col, isnull);
-		else if (isMatrix(rval))
-			return get_md_array_datum(rval, 2 /* matrix is 2D */, function, col, isnull);
+	result->get_datum[col] = get_mapper(TYPEOF(rval), result->elem_typid[col]);
 
-		PROTECT(rdims = getAttrib(rval, R_DimSymbol));
-		ndims = length(rdims);
-		UNPROTECT(1);
-
-		/* 2D and 3D arrays are specifically supported too */
-		if (ndims == 2 || ndims == 3)
-			return get_md_array_datum(rval, ndims, function, col, isnull);
-
-		/* everything else */
-		return get_generic_array_datum(rval, function, col, isnull);
-	}
-	else
-	{
-		/* create an empty array */
-		return PointerGetDatum(construct_empty_array(function->result_fld_elem_typid[col]));
-	}
+	return get_md_array_datum(rval, result, col);
 }
 
 static inline Datum
-get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool * isnull)
+get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull)
 {
 	SEXP		obj;
 	const char *value;
@@ -1142,7 +1179,7 @@ get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool 
 	if (value != NULL)
 	{
 		*isnull = false;
-		return FunctionCall3(&result_in_func,
+		return FunctionCall3(result_in_func,
 							 CStringGetDatum(value),
 							 ObjectIdGetDatum(0),
 							 Int32GetDatum(-1));
@@ -1153,16 +1190,9 @@ get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo result_in_func, bool 
 }
 
 static Datum
-get_frame_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
+get_frame_array_datum(SEXP rval, plr_result *result, int col)
 {
 	Datum		dvalue;
-	SEXP		obj;
-	const char *value;
-	Oid			result_elem;
-	FmgrInfo	in_func;
-	int			typlen;
-	bool		typbyval;
-	char		typalign;
 	int			i;
 	Datum	   *dvalues = NULL;
 	ArrayType  *array;
@@ -1177,69 +1207,32 @@ get_frame_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
 	SEXP		dfcol = NULL;
 	int			j;
 	bool	   *nulls = NULL;
-	bool		have_nulls = FALSE;
+	//get_datum_type mapper = get_mapper(TYPEOF(rval), result->elem_typid[col]);
+
+	//Assert(result->get_datum[col]);
 
 	if (nc < 1)
 		/* internal error */
 		elog(ERROR, "plr: bad internal representation of data.frame");
 
-	result_elem = function->result_fld_elem_typid[col];
-	in_func = function->result_fld_elem_in_func[col];
-	typlen = function->result_fld_elem_typlen[col];
-	typbyval = function->result_fld_elem_typbyval[col];
-	typalign = function->result_fld_elem_typalign[col];
-	
 	for (j = 0; j < nc; j++)
 	{
-		if (TYPEOF(rval) == VECSXP)
-			PROTECT(dfcol = VECTOR_ELT(rval, j));
-		else if (TYPEOF(rval) == LISTSXP)
-		{
-			PROTECT(dfcol = CAR(rval));
-			rval = CDR(rval);
-		}
-		else
-			/* internal error */
-			elog(ERROR, "plr: bad internal representation of data.frame");
-
-		/*
-		 * Not sure about this test. Need to reliably detect
-		 * factors and do the alternative assignment ONLY for them.
-		 * For the moment this locution seems to work correctly.
-		 */
-		if (ATTRIB(dfcol) == R_NilValue ||
-			TYPEOF(CAR(ATTRIB(dfcol))) != STRSXP)
-			PROTECT(obj = coerce_to_char(dfcol));
-		else
-			PROTECT(obj = coerce_to_char(CAR(ATTRIB(dfcol))));
+		PROTECT(dfcol = VECTOR_ELT(rval, j));
+		result->get_datum[col] = get_mapper(TYPEOF(dfcol), result->elem_typid[col]);
 
 		if (j == 0)
 		{
-			nr = length(obj);
+			nr = length(dfcol);
 			dvalues = (Datum *) palloc(nr * nc * sizeof(Datum));
 			nulls = (bool *) palloc(nr * nc * sizeof(bool));
 		}
 
 		for(i = 0; i < nr; i++)
 		{
-			value = CHAR(STRING_ELT(obj, i));
 			idx = ((i * nc) + j);
-
-			if (STRING_ELT(obj, i) == NA_STRING || value == NULL)
-			{
-				nulls[idx] = TRUE;
-				have_nulls = TRUE;
-			}
-			else
-			{
-				nulls[idx] = FALSE;
-				dvalues[idx] = FunctionCall3(&in_func,
-										CStringGetDatum(value),
-										(Datum) 0,
-										Int32GetDatum(-1));
-			}
+			dvalues[idx] = (*result->get_datum[col]) (dfcol, i, result->elem_in_func + col, nulls + idx);
 		}
-		UNPROTECT(2);
+		UNPROTECT(1);
 	}
 
 	dims[0] = nr;
@@ -1247,102 +1240,9 @@ get_frame_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
 	lbs[0] = 1;
 	lbs[1] = 1;
 
-	if (!have_nulls)
-		array = construct_md_array(dvalues, NULL, ndims, dims, lbs,
-									result_elem, typlen, typbyval, typalign);
-	else
-		array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-									result_elem, typlen, typbyval, typalign);
-
-	dvalue = PointerGetDatum(array);
-
-	return dvalue;
-}
-
-/* return simple, one dimensional array */
-static Datum
-get_simple_array_datum(SEXP rval, Oid typelem, bool *isnull)
-{
-	Datum		dvalue;
-	SEXP		obj;
-	SEXP		rdims;
-	const char *value;
-	int16		typlen;
-	bool		typbyval;
-	char		typdelim;
-	Oid			typinput,
-				typioparam;
-	FmgrInfo	in_func;
-	char		typalign;
-	int			i;
-	Datum	   *dvalues = NULL;
-	ArrayType  *array;
-	int			nitems;
-	int		   *dims;
-	int		   *lbs;
-	bool	   *nulls;
-	bool		have_nulls = FALSE;
-	int			ndims = 1;
-
-	dims = palloc(ndims * sizeof(int));
-	lbs = palloc(ndims * sizeof(int));
-
-	/*
-	 * get the element type's in_func
-	 */
-	get_type_io_data(typelem, IOFunc_output, &typlen, &typbyval,
-					 &typalign, &typdelim, &typioparam, &typinput);
-
-	perm_fmgr_info(typinput, &in_func);
-
-	PROTECT(rdims = getAttrib(rval, R_DimSymbol));
-	if (length(rdims) > 1)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("greater than 1-dimensional arrays are " \
-						"not supported in this context")));
-
-	dims[0] = INTEGER(rdims)[0];
-	lbs[0] = 1;
-	UNPROTECT(1);
-
-	nitems = dims[0];
-	if (nitems == 0)
-	{
-		*isnull = true;
-		return (Datum) 0;
-	}
-
-	dvalues = (Datum *) palloc(nitems * sizeof(Datum));
-	nulls = (bool *) palloc(nitems * sizeof(bool));
-	PROTECT(obj =  coerce_to_char(rval));
-
-	for (i = 0; i < nitems; i++)
-	{
-		value = CHAR(STRING_ELT(obj, i));
-
-		if (STRING_ELT(obj, i) == NA_STRING || value == NULL)
-		{
-			nulls[i] = TRUE;
-			have_nulls = TRUE;
-		}
-		else
-		{
-			nulls[i] = FALSE;
-			dvalues[i] = FunctionCall3(&in_func,
-										CStringGetDatum(value),
-										(Datum) 0,
-										Int32GetDatum(-1));
-		}
-	}
-	UNPROTECT(1);
-
-	if (!have_nulls)
-		array = construct_md_array(dvalues, NULL, ndims, dims, lbs,
-									typelem, typlen, typbyval, typalign);
-	else
-		array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-									typelem, typlen, typbyval, typalign);
+	array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
+							   result->elem_typid[col], result->elem_typlen[col],
+							   result->elem_typbyval[col], result->elem_typalign[col]);
 
 	dvalue = PointerGetDatum(array);
 
@@ -1350,510 +1250,105 @@ get_simple_array_datum(SEXP rval, Oid typelem, bool *isnull)
 }
 
 static Datum
-get_md_array_datum(SEXP rval, int ndims, plr_function *function, int col, bool *isnull)
+get_md_array_datum(SEXP rval, plr_result *result, int col)
 {
 	Datum		dvalue;
-	SEXP		obj;
 	SEXP		rdims;
-	const char *value;
-	Oid			result_elem;
-	FmgrInfo	in_func;
-	int			typlen;
-	bool		typbyval;
-	char		typalign;
-	int			i, j, k;
+	int			i, j;
+	int			cardinality = length(rval);
 	Datum	   *dvalues = NULL;
 	ArrayType  *array;
-	int			nitems;
-	int			nr = 1;
-	int			nc = 1;
-	int			nz = 1;
 	int		   *dims;
 	int		   *lbs;
+	int		   *cumprod;
+	int		   *cumprod2;
+	int		   *subs;
 	int			idx;
-	int			cntr = 0;
 	bool	   *nulls;
-	bool		have_nulls = FALSE;
-	Oid 		return_type_oid = function->result_fld_elem_typid[col];
+	int			ndims;
+	FmgrInfo	in_func = result->elem_in_func[col];
+	get_datum_type mapper = result->get_datum[col];
 
+	Assert(result->get_datum[col]);
+
+	PROTECT(rdims = GET_DIM(rval));
+	ndims = length(rdims);
+	if (ndims == 0)
+		ndims = 1;
+	cumprod = palloc((ndims + 1) * sizeof(int)); /* first is always 1, last is always cardinality */
+	cumprod2 = palloc((ndims + 1) * sizeof(int)); /* first is always 1, last is always cardinality */
 	if (ndims > 0)
 	{
 		dims = palloc(ndims * sizeof(int));
 		lbs = palloc(ndims * sizeof(int));
+		subs = palloc(ndims * sizeof(int));
+		cumprod[0] = 1;
+		cumprod2[0] = 1;
+		if (!isNull(rdims)) /* matrix, array */
+			for (i = 0; i < ndims; i++)
+			{
+				dims[i] = INTEGER_ELT(rdims, i);
+				cumprod[i + 1] = cumprod[i] * dims[i];
+				cumprod2[i + 1] = cumprod2[i] * INTEGER_ELT(rdims, ndims - i - 1);
+				lbs[i] = 1;
+			}
+		else /* plain vector */
+		{
+			lbs[0] = 1;
+			dims[0] = cardinality;
+			cumprod[1] = cardinality;
+			cumprod2[1] = 1;
+		}
 	}
 	else
 	{
 		dims = NULL;
 		lbs = NULL;
 	}
-	
-	result_elem = function->result_fld_elem_typid[col];
-	in_func = function->result_fld_elem_in_func[col];
-	typlen = function->result_fld_elem_typlen[col];
-	typbyval = function->result_fld_elem_typbyval[col];
-	typalign = function->result_fld_elem_typalign[col];
-
-	PROTECT(rdims = getAttrib(rval, R_DimSymbol));
-	for(i = 0; i < ndims; i++)
-	{
-		dims[i] = INTEGER(rdims)[i];
-		lbs[i] = 1;
-
-		switch (i)
-		{
-			case 0:
-				nr = dims[i];
-				break;
-			case 1:
-				nc = dims[i];
-				break;
-			case 2:
-				nz = dims[i];
-				break;
-			default:
-				/* anything higher is currently unsupported */
-				ereport(ERROR,
-						(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-						 errmsg("greater than 3-dimensional arrays are " \
-								"not yet supported")));
-		}
-
-	}
 	UNPROTECT(1);
 
-	nitems = nr * nc * nz;
-	dvalues = (Datum *) palloc(nitems * sizeof(Datum));
-	nulls = (bool *) palloc(nitems * sizeof(bool));
+	dvalues = (Datum *) palloc(cardinality * sizeof(Datum));
+	nulls = (bool *) palloc(cardinality * sizeof(bool));
 
-	/*
-	 * Convert common R data type directly to datum
-	 */
-	if (TYPEOF(rval) == REALSXP && return_type_oid == INT8OID)
+	for (i = 0; i < cardinality; i++)
 	{
-		for (i = 0; i < nr; i++)
+		/* Convert linear index from fast last to fast first subscript
+		 * through mixed radix conversion, subscripts order flip,
+		 * and conversion back from mixed radix to linear index using dot product  */
+		idx = i;
+		for (j = 0; j < ndims; j++)
 		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (REAL(rval)[idx] == NA_REAL)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = Int64GetDatum((int64) REAL(rval)[idx]);
-					}
-				}
-			}
+			const int tmp = cumprod2[ndims - j - 1];
+			subs[j] = idx / tmp;
+			idx %= tmp;
 		}
-	}
-	else if (TYPEOF(rval) == REALSXP && return_type_oid == FLOAT4OID)
-	{
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (REAL(rval)[idx] == NA_REAL)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = Float4GetDatum((float) REAL(rval)[idx]);
-					}
-				}
-			}
-		}
-	}
-	else if (TYPEOF(rval) == REALSXP && return_type_oid == FLOAT8OID)
-	{
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (REAL(rval)[idx] == NA_REAL)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = Float8GetDatum((double) REAL(rval)[idx]);
-					}
-				}
-			}
-		}
-	}
-	else if (TYPEOF(rval) == REALSXP && return_type_oid == NUMERICOID)
-	{
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (REAL(rval)[idx] == NA_REAL)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = DirectFunctionCall1(float8_numeric, Float8GetDatum((double)REAL(rval)[idx]));
-					}
-				}
-			}
-		}
-	}
-	else if (TYPEOF(rval) == INTSXP && return_type_oid == INT4OID)
-	{
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (INTEGER(rval)[idx] == NA_INTEGER)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = Int32GetDatum((int32) INTEGER(rval)[idx]);
-					}
-				}
-			}
-		}
-	}
-	else if (TYPEOF(rval) == INTSXP && return_type_oid == INT2OID)
-	{
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int     arridx = cntr++;
-					idx = (k * nr * nc) + (j * nr) + i;
-					if (INTEGER(rval)[idx] == NA_INTEGER)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = Int16GetDatum((int16) INTEGER(rval)[idx]);
-					}
-				}
-			}
-		}
-	}
-	else
-	{
-		PROTECT(obj =  coerce_to_char(rval));
+		// Assert(idx == 0);
+		for (j = 0; j < ndims; j++)
+			idx += subs[j] * cumprod[j];
 
-		for (i = 0; i < nr; i++)
-		{
-			for (j = 0; j < nc; j++)
-			{
-				for (k = 0; k < nz; k++)
-				{
-					int		arridx = cntr++;
-
-					idx = (k * nr * nc) + (j * nr) + i;
-					value = CHAR(STRING_ELT(obj, idx));
-
-					if (STRING_ELT(obj, idx) == NA_STRING || value == NULL)
-					{
-						nulls[arridx] = TRUE;
-						have_nulls = TRUE;
-					}
-					else
-					{
-						nulls[arridx] = FALSE;
-						dvalues[arridx] = FunctionCall3(&in_func,
-												CStringGetDatum(value),
-												(Datum) 0,
-												Int32GetDatum(-1));
-					}
-				}
-			}
-		}
-		UNPROTECT(1);
+		dvalues[i] = (*mapper) (rval, idx, &in_func, &nulls[i]);
 	}
-	if (!have_nulls)
-		array = construct_md_array(dvalues, NULL, ndims, dims, lbs,
-									result_elem, typlen, typbyval, typalign);
-	else
-		array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-									result_elem, typlen, typbyval, typalign);
+
+	array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
+							   result->elem_typid[col], result->elem_typlen[col],
+							   result->elem_typbyval[col], result->elem_typalign[col]);
 
 	dvalue = PointerGetDatum(array);
 
-	return dvalue;
-}
-
-static Datum
-get_generic_array_datum(SEXP rval, plr_function *function, int col, bool *isnull)
-{
-	int			objlen = length(rval);
-	Datum		dvalue;
-	SEXP		obj;
-	const char *value;
-	Oid			result_elem;
-	FmgrInfo	in_func;
-	int			typlen;
-	bool		typbyval;
-	char		typalign;
-	int			i;
-	Datum	   *dvalues = NULL;
-	ArrayType  *array;
-#define FIXED_NUM_DIMS		1
-	int			ndims = FIXED_NUM_DIMS;
-	int			dims[FIXED_NUM_DIMS];
-	int			lbs[FIXED_NUM_DIMS];
-#undef FIXED_NUM_DIMS
-	bool	   *nulls;
-	bool		have_nulls = FALSE;
-	bool		fast_track_type;
-	bool		has_na = false;
-
-	result_elem = function->result_fld_elem_typid[col];
-	in_func = function->result_fld_elem_in_func[col];
-	typlen = function->result_fld_elem_typlen[col];
-	typbyval = function->result_fld_elem_typbyval[col];
-	typalign = function->result_fld_elem_typalign[col];
-
-	/*
-	 * Special case for pass-by-value data types, if the following conditions are met:
-	 * 		designated fast_track_type
-	 * 		no NULL/NA elements
-	 */
-	if (TYPEOF(rval) == INTSXP ||
-		TYPEOF(rval) == REALSXP)
-	{
-		switch (TYPEOF(rval)) {
-		case INTSXP:
-			if (result_elem == INT4OID)
-			{
-				fast_track_type = true;
-				for (i = 0; i < objlen; i++)
-				{
-					if (INTEGER(rval)[i] == NA_INTEGER)
-					{
-						has_na = true;
-						break;
-					}
-				}
-			}
-			else
-				fast_track_type = false;
-
-			break;
-		case REALSXP:
-			if (result_elem == FLOAT8OID)
-			{
-				fast_track_type = true;
-				for (i = 0; i < objlen; i++)
-				{
-					if (ISNAN(REAL(rval)[i]))
-					{
-						has_na = true;
-						break;
-					}
-				}
-			}
-			else
-				fast_track_type = false;
-
-			break;
-		default:
-			fast_track_type = false;
-			has_na = true;	/* does not really matter in this case */
-		}
-	}
-	else
-	{
-		fast_track_type = false;
-		has_na = true;	/* does not really matter in this case */
-	}
-
-	if (fast_track_type &&
-		 typbyval &&
-		 !has_na)
-	{
-		int32		nbytes = 0;
-		int32		dataoffset;
-
-		if (TYPEOF(rval) == INTSXP)
-		{
-			nbytes = objlen * sizeof(INTEGER_DATA(rval));
-			dvalues = (Datum *) INTEGER_DATA(rval);
-		}
-		else if (TYPEOF(rval) == REALSXP)
-		{
-			nbytes = objlen * sizeof(NUMERIC_DATA(rval));
-			dvalues = (Datum *) NUMERIC_DATA(rval);
-		}
-		else
-			elog(ERROR, "attempted to passthrough invalid R datatype to Postgresql");
-
-		dims[0] = objlen;
-		lbs[0] = 1;
-		dataoffset = 0;			/* marker for no null bitmap */
-
-		array = (ArrayType *) palloc0(nbytes + ARR_OVERHEAD_NONULLS(ndims));
-		SET_VARSIZE(array, nbytes + ARR_OVERHEAD_NONULLS(ndims));
-		array->ndim = ndims;
-		array->dataoffset = dataoffset;
-		array->elemtype = result_elem;
-		memcpy(ARR_DIMS(array), dims, ndims * sizeof(int));
-		memcpy(ARR_LBOUND(array), lbs, ndims * sizeof(int));
-		memcpy(ARR_DATA_PTR(array), dvalues, nbytes);
-
-		dvalue = PointerGetDatum(array);
-	}
-	else
-	{
-		/* original code */
-		dvalues = (Datum *) palloc(objlen * sizeof(Datum));
-		nulls = (bool *) palloc(objlen * sizeof(bool));
-
-		/*
-		 * Convert common R data type directly to datum
-		 */
-		if (TYPEOF(rval) == REALSXP && result_elem == INT8OID)
-		{
-			for(i = 0; i < objlen; i++)
-			{
-				if (REAL(rval)[i] == NA_REAL)
-				{
-					nulls[i] = TRUE;
-					have_nulls = TRUE;
-				}
-				else
-				{
-					nulls[i] = FALSE;
-					dvalues[i] = Int64GetDatum((int64) REAL(rval)[i]);
-				}
-			}
-		}
-		else if((TYPEOF(rval) == REALSXP && result_elem == FLOAT4OID))
-		{
-			for(i = 0; i < objlen; i++)
-			{
-				if (REAL(rval)[i] == NA_REAL)
-				{
-					nulls[i] = TRUE;
-					have_nulls = TRUE;
-				}
-				else
-				{
-					nulls[i] = FALSE;
-					dvalues[i] = Float4GetDatum((float) REAL(rval)[i]);
-				}
-			}
-		}
-		else if((TYPEOF(rval) == REALSXP && result_elem == NUMERICOID))
-		{
-			for(i = 0; i < objlen; i++)
-			{
-				if (REAL(rval)[i] == NA_REAL)
-				{
-					nulls[i] = TRUE;
-					have_nulls = TRUE;
-				}
-				else
-				{
-					nulls[i] = FALSE;
-					dvalues[i] = DirectFunctionCall1(float8_numeric, Float8GetDatum((double)REAL(rval)[i]));
-				}
-			}
-		}
-		else if((TYPEOF(rval) == INTSXP && result_elem == INT2OID))
-		{
-			for(i = 0; i < objlen; i++)
-			{
-				if (INTEGER(rval)[i] == NA_INTEGER)
-				{
-					nulls[i] = TRUE;
-					have_nulls = TRUE;
-				}
-				else
-				{
-					nulls[i] = FALSE;
-					dvalues[i] = Int16GetDatum((int16) INTEGER(rval)[i]);
-				}
-			}
-		}
-		else
-		{
-			PROTECT(obj =  coerce_to_char(rval));
-
-			/* Loop is needed here as result value might be of length > 1 */
-			for(i = 0; i < objlen; i++)
-			{
-				value = CHAR(STRING_ELT(obj, i));
-
-				if (STRING_ELT(obj, i) == NA_STRING || value == NULL)
-				{
-					nulls[i] = TRUE;
-					have_nulls = TRUE;
-				}
-				else
-				{
-					nulls[i] = FALSE;
-					dvalues[i] = FunctionCall3(&in_func,
-											CStringGetDatum(value),
-											(Datum) 0,
-											Int32GetDatum(-1));
-				}
-			}
-			UNPROTECT(1);
-		}
-		dims[0] = objlen;
-		lbs[0] = 1;
-
-		if (!have_nulls)
-			array = construct_md_array(dvalues, NULL, ndims, dims, lbs,
-										result_elem, typlen, typbyval, typalign);
-		else
-			array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-										result_elem, typlen, typbyval, typalign);
-
-		dvalue = PointerGetDatum(array);
-	}
+	pfree(cumprod);
+	pfree(cumprod2);
+	pfree(dims);
+	pfree(lbs);
+	pfree(subs);
+	pfree(dvalues);
+	pfree(nulls);
 
 	return dvalue;
 }
 
 static void
 get_tuplestore_imp(SEXP rval,
-					 plr_function *function,
+					 plr_result *result,
 					 TupleDesc tupdesc,
 					 Tuplestorestate *tupstore)
 {
@@ -1914,6 +1409,15 @@ get_tuplestore_imp(SEXP rval,
 	values = palloc0(sizeof(Datum) * tupdesc_nc);
 	isnull = palloc0(sizeof(bool) * tupdesc_nc);
 
+	for (j = 0; j < nc; j++)
+	{
+		if (is_frame)
+			el = VECTOR_ELT(rval, j);
+		else
+			el = rval;
+		result->get_datum[j] = get_mapper(TYPEOF(el), result->elem_typid[j]);
+	}
+
 	for(i = 0; i < nr; i++)
 	{
 		for (j = 0; j < nc; j++)
@@ -1942,14 +1446,13 @@ get_tuplestore_imp(SEXP rval,
 					elog(ERROR, "Failed to get subscript");
 			}
 
-			if (likely(function->result_fld_typid[j] == function->result_fld_elem_typid[j]))
+			if (likely(result->typid[j] == result->elem_typid[j]))
 				values[j] = get_scalar_datum(el,
-											 function->result_fld_elem_typid[j],
-											 function->result_fld_elem_in_func[j],
+											 result, j,
 											 isnull + j,
 											 idx);
 			else
-				values[j] = get_array_datum(el, function, j, isnull + j);
+				values[j] = get_md_array_datum(el, result, j);
 
 			UNPROTECT(1);
 		}

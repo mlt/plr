@@ -855,7 +855,7 @@ plr_trigger_handler(PG_FUNCTION_ARGS)
 	 */
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish failed");
-	retval = r_get_pg(rvalue, function, fcinfo);
+	retval = r_get_pg(rvalue, &function->result, fcinfo);
 
 	POP_PLERRCONTEXT;
 	UNPROTECT(3);
@@ -934,7 +934,7 @@ plr_func_handler(PG_FUNCTION_ARGS)
 	 */
 	if (SPI_finish() != SPI_OK_FINISH)
 		elog(ERROR, "SPI_finish failed");
-	retval = r_get_pg(rvalue, function, fcinfo);
+	retval = r_get_pg(rvalue, &function->result, fcinfo);
 
 	POP_PLERRCONTEXT;
 	UNPROTECT(3);
@@ -1162,32 +1162,34 @@ do_compile(FunctionCallInfo fcinfo,
 	switch (tfc)
 	{
 		case TYPEFUNC_SCALAR:
-			function->result_natts = 1;
+			function->result.natts = 1;
 			break;
 		case TYPEFUNC_COMPOSITE:
-			function->result_natts = tupdesc->natts;
+			function->result.natts = tupdesc->natts;
 			break;
 		case TYPEFUNC_OTHER: // trigger
-			function->result_natts = 0;
+			function->result.natts = 0;
 			break;
 		default:
 			elog(ERROR, "unknown function type %u", tfc);
 	}
 
-	if (function->result_natts > 0)
+	if (function->result.natts > 0)
 	{
-		function->result_fld_typid = (Oid *)
-			palloc0(function->result_natts * sizeof(Oid));
-		function->result_fld_elem_typid = (Oid *)
-			palloc0(function->result_natts * sizeof(Oid));
-		function->result_fld_elem_in_func = (FmgrInfo *)
-			palloc0(function->result_natts * sizeof(FmgrInfo));
-		function->result_fld_elem_typlen = (int16 *)
-			palloc0(function->result_natts * sizeof(int));
-		function->result_fld_elem_typbyval = (bool *)
-			palloc0(function->result_natts * sizeof(bool));
-		function->result_fld_elem_typalign = (char *)
-			palloc0(function->result_natts * sizeof(char));
+		function->result.typid = (Oid *)
+			palloc0(function->result.natts * sizeof(Oid));
+		function->result.elem_typid = (Oid *)
+			palloc0(function->result.natts * sizeof(Oid));
+		function->result.elem_in_func = (FmgrInfo *)
+			palloc0(function->result.natts * sizeof(FmgrInfo));
+		function->result.elem_typlen = (int16 *)
+			palloc0(function->result.natts * sizeof(int));
+		function->result.elem_typbyval = (bool *)
+			palloc0(function->result.natts * sizeof(bool));
+		function->result.elem_typalign = (char *)
+			palloc0(function->result.natts * sizeof(char));
+		function->result.get_datum = (get_datum_type *)
+			palloc0(function->result.natts * sizeof(get_datum_type));
 	}
 
 	if (!is_trigger)
@@ -1242,27 +1244,27 @@ do_compile(FunctionCallInfo fcinfo,
 			}
 		}
 
-		for (i = 0; i < function->result_natts; i++)
+		for (i = 0; i < function->result.natts; i++)
 		{
 			if (TYPEFUNC_COMPOSITE == tfc)
-				function->result_fld_typid[i] = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
+				function->result.typid[i] = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
 			else
-				function->result_fld_typid[i] = result_typid;
-			function->result_fld_elem_typid[i] = get_element_type(function->result_fld_typid[i]);
-			if (InvalidOid == function->result_fld_elem_typid[i])
-				function->result_fld_elem_typid[i] = function->result_fld_typid[i];
-			if (OidIsValid(function->result_fld_elem_typid[i]))
+				function->result.typid[i] = result_typid;
+			function->result.elem_typid[i] = get_element_type(function->result.typid[i]);
+			if (InvalidOid == function->result.elem_typid[i])
+				function->result.elem_typid[i] = function->result.typid[i];
+			if (OidIsValid(function->result.elem_typid[i]))
 			{
 				char			typdelim;
 				Oid				typinput, typelem;
 
-				get_type_io_data(function->result_fld_elem_typid[i], IOFunc_input,
-					function->result_fld_elem_typlen + i,
-					function->result_fld_elem_typbyval + i,
-					function->result_fld_elem_typalign + i,
+				get_type_io_data(function->result.elem_typid[i], IOFunc_input,
+					function->result.elem_typlen + i,
+					function->result.elem_typbyval + i,
+					function->result.elem_typalign + i,
 					&typdelim, &typelem, &typinput);
 
-				perm_fmgr_info(typinput, function->result_fld_elem_in_func + i);
+				perm_fmgr_info(typinput, function->result.elem_in_func + i);
 			}
 			else
 				elog(ERROR, "Invalid type for return attribute #%u", i);

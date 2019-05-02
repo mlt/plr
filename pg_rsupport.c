@@ -42,10 +42,7 @@ static void rsupport_error_callback(void *arg);
 typedef struct saved_plan_desc
 {
 	void	   *saved_plan;
-	int			nargs;
-	Oid		   *typeids;
-	Oid		   *typelems;
-	FmgrInfo   *typinfuncs;
+	plr_result	result;
 }	saved_plan_desc;
 
 /*
@@ -265,11 +262,7 @@ SEXP
 plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 {
 	const char		   *sql;
-	int					nargs;
 	int					i;
-	Oid				   *typeids = NULL;
-	Oid				   *typelems = NULL;
-	FmgrInfo		   *typinfuncs = NULL;
 	void			   *pplan = NULL;
 	void			   *saved_plan;
 	saved_plan_desc	   *plan_desc;
@@ -298,53 +291,59 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 		error("%s", "second parameter must be a vector of PostgreSQL datatypes");
 
 	/* deal with case of no parameters for the prepared query */
-	if (rargtypes == R_MissingArg || INTEGER(rargtypes)[0] == NA_INTEGER)
-		nargs = 0;
+	if (rargtypes == R_MissingArg || INTEGER_ELT(rargtypes, 0) == NA_INTEGER)
+		plan_desc->result.natts = 0;
 	else
-		nargs = length(rargtypes);
+		plan_desc->result.natts = length(rargtypes);
 
-	if (nargs < 0)	/* can this even happen?? */
+	if (plan_desc->result.natts < 0)	/* can this even happen?? */
 		error("%s", "second parameter must be a vector of PostgreSQL datatypes");
 
-	if (nargs > 0)
+	if (plan_desc->result.natts > 0)
 	{
 		/* switch to long lived context to create plan description elements */
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-		typeids = (Oid *) palloc(nargs * sizeof(Oid));
-		typelems = (Oid *) palloc(nargs * sizeof(Oid));
-		typinfuncs = (FmgrInfo *) palloc(nargs * sizeof(FmgrInfo));
+		plan_desc->result.typid = (Oid *)palloc(plan_desc->result.natts * sizeof(Oid));
+		plan_desc->result.elem_typid = (Oid *)palloc(plan_desc->result.natts * sizeof(Oid));
+		plan_desc->result.elem_in_func = (FmgrInfo *) palloc(plan_desc->result.natts * sizeof(FmgrInfo));
+		plan_desc->result.elem_typlen = (int16 *)
+			palloc0(plan_desc->result.natts * sizeof(int));
+		plan_desc->result.elem_typbyval = (bool *)
+			palloc0(plan_desc->result.natts * sizeof(bool));
+		plan_desc->result.elem_typalign = (char *)
+			palloc0(plan_desc->result.natts * sizeof(char));
+		plan_desc->result.get_datum = (get_datum_type *)
+			palloc0(plan_desc->result.natts * sizeof(get_datum_type *));
 
 		MemoryContextSwitchTo(oldcontext);
 
-		for (i = 0; i < nargs; i++)
+		for (i = 0; i < plan_desc->result.natts; i++)
 		{
-			int16		typlen;
-			bool		typbyval;
 			char		typdelim;
 			Oid			typinput,
 						typelem;
-			char		typalign;
-			FmgrInfo	typinfunc;
 
-			typeids[i] = INTEGER(rargtypes)[i];
+			plan_desc->result.typid[i] = INTEGER_ELT(rargtypes, i);
 
 			/* switch to long lived context to create plan description elements */
 			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-			get_type_io_data(typeids[i], IOFunc_input, &typlen, &typbyval,
-							 &typalign, &typdelim, &typelem, &typinput);
-			typelems[i] = get_element_type(typeids[i]);
+			plan_desc->result.elem_typid[i] = get_element_type(plan_desc->result.typid[i]);
+			if (InvalidOid == plan_desc->result.elem_typid[i])
+				plan_desc->result.elem_typid[i] = plan_desc->result.typid[i];
+			get_type_io_data(plan_desc->result.elem_typid[i], IOFunc_input,
+							 plan_desc->result.elem_typlen + i,
+							 plan_desc->result.elem_typbyval + i,
+							 plan_desc->result.elem_typalign + i,
+							 &typdelim, &typelem, &typinput);
 
 			MemoryContextSwitchTo(oldcontext);
 
 			/* perm_fmgr_info already uses TopMemoryContext */
-			perm_fmgr_info(typinput, &typinfunc);
-			typinfuncs[i] = typinfunc;
+			perm_fmgr_info(typinput, &plan_desc->result.elem_in_func[i]);
 		}
 	}
-	else
-		typeids = NULL;
 
 	UNPROTECT(1);
 
@@ -358,7 +357,7 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 	PG_TRY();
 	{
 		/* Prepare plan for query */
-		pplan = SPI_prepare(sql, nargs, typeids);
+		pplan = SPI_prepare(sql, plan_desc->result.natts, plan_desc->result.natts > 0 ? plan_desc->result.typid : NULL);
 	}
 	PLR_PG_CATCH();
 	PLR_PG_END_TRY();
@@ -438,10 +437,6 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 	SPI_freeplan(pplan);
 
 	plan_desc->saved_plan = saved_plan;
-	plan_desc->nargs = nargs;
-	plan_desc->typeids = typeids;
-	plan_desc->typelems = typelems;
-	plan_desc->typinfuncs = typinfuncs;
 
 	result = R_MakeExternalPtr(plan_desc, R_NilValue, R_NilValue);
 
@@ -457,10 +452,10 @@ plr_SPI_execp(SEXP rsaved_plan, SEXP rargvalues)
 {
 	saved_plan_desc	   *plan_desc = (saved_plan_desc *) R_ExternalPtrAddr(rsaved_plan);
 	void			   *saved_plan = plan_desc->saved_plan;
-	int					nargs = plan_desc->nargs;
-	Oid				   *typeids = plan_desc->typeids;
-	Oid				   *typelems = plan_desc->typelems;
-	FmgrInfo		   *typinfuncs = plan_desc->typinfuncs;
+	int					nargs = plan_desc->result.natts;
+	Oid				   *typeids = plan_desc->result.typid;
+	Oid				   *typelems = plan_desc->result.elem_typid;
+	FmgrInfo		   *typinfuncs = plan_desc->result.elem_in_func;
 	int					i;
 	Datum			   *argvalues = NULL;
 	char			   *nulls = NULL;
@@ -496,7 +491,7 @@ plr_SPI_execp(SEXP rsaved_plan, SEXP rargvalues)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
 
-		argvalues[i] = get_datum(obj, typeids[i], typelems[i], typinfuncs[i], &isnull);
+		argvalues[i] = get_datum(obj, &plan_desc->result, i, &isnull);
 		if (!isnull)
 			nulls[i] = ' ';
 		else
@@ -624,9 +619,9 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 {
 	saved_plan_desc	   *plan_desc = (saved_plan_desc *) R_ExternalPtrAddr(rsaved_plan);
 	void			   *saved_plan = plan_desc->saved_plan;
-	int					nargs = plan_desc->nargs;
-	Oid				   *typeids = plan_desc->typeids;
-	FmgrInfo		   *typinfuncs = plan_desc->typinfuncs;
+	const int			nargs = plan_desc->result.natts;
+	Oid				   *typeids = plan_desc->result.typid;
+	FmgrInfo		   *typinfuncs = plan_desc->result.elem_in_func;
 	int					i;
 	Datum			   *argvalues = NULL;
 	char			   *nulls = NULL;
@@ -658,8 +653,8 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	for (i = 0; i < nargs; i++)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
-
-		argvalues[i] = get_scalar_datum(obj, typeids[i], typinfuncs[i], &isnull, 0);
+		plan_desc->result.get_datum[i] = get_mapper(TYPEOF(obj), plan_desc->result.elem_typid[i]);
+		argvalues[i] = get_scalar_datum(obj, &plan_desc->result, i, &isnull, 0);
 		if (!isnull)
 			nulls[i] = ' ';
 		else
