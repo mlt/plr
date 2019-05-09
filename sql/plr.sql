@@ -336,6 +336,9 @@ select f1[0][1][1] is null as "NULL" from (select '{{{111,112},{121,122},{131,13
 create or replace function arr3d(_int4) returns int4[] as 'return(arg1)' language 'plr' STRICT;
 select arr3d('{{{111,112},{121,122},{131,132}},{{211,212},{221,222},{231,232}}}');
 
+create or replace function arr5d() returns _float8 as 'aperm( array(1:32, rep(2,5)), 5:1 )' language plr;
+select arr5d();
+
 --
 -- Trigger support tests
 --
