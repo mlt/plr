@@ -1691,7 +1691,7 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 				for (i = 0; i < function->nargs; i++, t = CDR(t))
 				{
 					el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
-						R_NilValue : */ (function->arg_is_rel[i] ? pg_window_frame_get_r_frame : pg_window_frame_get_r)(winobj, i, function);
+						R_NilValue : */ pg_window_frame_get_r(winobj, i, function);
 					SET_VECTOR_ELT(lst, i, el);
 					SETCAR(t, el);
 				}
@@ -1714,7 +1714,7 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 			for (i = 0; i < function->nargs; i++, t = CDR(t))
 			{
 				el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
-					R_NilValue : */ (function->arg_is_rel[i] ? pg_window_frame_get_r_frame : pg_window_frame_get_r)(winobj, i, function);
+					R_NilValue : */ pg_window_frame_get_r(winobj, i, function);
 
 				SETCAR(t, el);
 			}

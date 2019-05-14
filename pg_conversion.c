@@ -34,7 +34,7 @@
  */
 #include "plr.h"
 
-static void pg_get_one_r(char *value, Oid arg_out_fn_oid, SEXP *obj,
+static void pg_get_one_r(char *value, Oid arg_out_fn_oid, SEXP obj,
 																int elnum);
 static SEXP get_r_vector(Oid typtype, int64 numels);
 static Datum get_trigger_tuple(SEXP rval, plr_function *function,
@@ -88,7 +88,7 @@ pg_scalar_get_r(Datum dvalue, Oid arg_typid, FmgrInfo arg_out_func)
 
 		/* get new vector of the appropriate type, length 1 */
 		PROTECT(result = get_r_vector(arg_typid, 1));
-		pg_get_one_r(value, arg_typid, &result, 0);
+		pg_get_one_r(value, arg_typid, result, 0);
 		UNPROTECT(1);
 	}
 	else
@@ -296,7 +296,7 @@ pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typbyval, char 
 					 * Note that pg_get_one_r() replaces NULL values with
 					 * the NA value appropriate for the data type.
 					 */
-					pg_get_one_r(value, element_type, &result, idx);
+					pg_get_one_r(value, element_type, result, idx);
 					if (value != NULL)
 						pfree(value);
 				}
@@ -327,7 +327,9 @@ pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typbyval, char 
 #ifdef HAVE_WINDOW_FUNCTIONS
 /*
  * Evaluate a window function's argument expression on a specified
- *		window frame, returning R array for the argno column in the frame
+ *		window frame, returning either an array or an R dataframe
+ *		for the argno column in the frame, depending on whether
+ *		the argno argument is of composite type or not
  *
  * winobj: PostgreSQL window object handle
  * argno: argument number to evaluate (counted from 0)
@@ -336,144 +338,81 @@ pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typbyval, char 
 SEXP
 pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 {
-	/*
-	 * Loop through and convert each scalar value.
-	 * Use the converted values to build an R vector.
-	 */
-	SEXP		result;
-	int			numels = 0;
-	Oid			element_type = function->arg_typid[argno];
+	char		buf[256];
+	SEXP		result, v, names, row_names;
+	int64	   i, numels = 0;
+	int		 j, nc = 1, nc_effective = 1, df_colnum = 0;
+	Datum	   dvalue;
+	bool		isnull, isout = false;
+	bool		isrel = function->arg_is_rel[argno];
+	Oid		 element_type = function->arg_typid[argno];
 	FmgrInfo	out_func = function->arg_out_func[argno];
-	int64		totalrows = WinGetPartitionRowCount(winobj);
+	int64	   nr = WinGetPartitionRowCount(winobj);
+	/* for tuple arguments */
+	HeapTuple   tuple;
+	HeapTupleHeader tuple_hdr;
+	Oid		 tupType;
+	int32	   tupTypmod;
+	TupleDesc   tupdesc;
+	/* for array arguments */
+	Oid		 typelem = get_element_type(element_type);
+	int16	   typlen;
+	bool		typbyval;
+	char		typdelim, typalign;
+	Oid		 typoutput, typioparam;
+	FmgrInfo	outputproc;
+
+	if (nr < 1)
+		return R_NilValue;
 
 	/*
-	 * Get new vector of the appropriate type.
-	 * We presume unbound frame as a common use case in R.
-	 * If not, we will trim vector later.
+	 * Check to see if arg is an array type. get_element_type() will return
+	 * InvalidOid instead of actual element type if the type is not a
+	 * varlena array.
 	 */
-	PROTECT(result = get_r_vector(element_type, totalrows));
+	if (!isrel && typelem != InvalidOid)
+	{
+		get_type_io_data(typelem, IOFunc_output, &typlen, &typbyval, &typalign, &typdelim, &typioparam, &typoutput);
+		fmgr_info(typoutput, &outputproc);
+	}
 
-	/* Convert all values to their R form and build the vector */
+	if (isrel)
+	{
+		/* Get current row for starters, setting mark
+		 Need this to get tuple info in order to build an R dataframe */
+		dvalue = WinGetFuncArgInFrame(winobj, argno, 0, WINDOW_SEEK_HEAD,
+									  true, &isnull, &isout);
+		if (isout || isnull)
+			return R_NilValue;
+
+		/* Count non-dropped attributes so we can later ignore the dropped ones */
+		tuple_hdr = DatumGetHeapTupleHeader(dvalue);
+		tupType   = HeapTupleHeaderGetTypeId(tuple_hdr);
+		tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr);
+		tupdesc   = lookup_rowtype_tupdesc(tupType, tupTypmod);
+		nc		= tupdesc->natts;
+		for (j = 0, nc_effective = 0; j < nc; j++)
+		{
+			if (!TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+				nc_effective++;
+		}
+		/*
+		 * Allocate the resulting data.frame initially as a list,
+		 * and also allocate a names vector for the column names.
+		 * If !isrel, then nc == nc_effective == 1, see below
+		 */
+		PROTECT(names = NEW_CHARACTER(nc_effective));
+	}
+	PROTECT(result = NEW_LIST(nc_effective));
+
 	for (;; numels++)
 	{
-		char	   *value;
-		bool		isnull;
-		Datum		dvalue;
-		bool		isout = false;
-		bool		set_mark = (0 == numels);
-
-		dvalue = WinGetFuncArgInFrame(winobj, argno, numels, WINDOW_SEEK_HEAD,
-			set_mark, &isnull, &isout);
+		dvalue = WinGetFuncArgInFrame(winobj, argno, numels, WINDOW_SEEK_HEAD, numels == 0, &isnull, &isout);
 
 		if (isout)
 			break;
 
-		switch (element_type)
-		{
-			case BOOLOID:
-				LOGICAL_DATA(result)[numels] = isnull ? NA_LOGICAL : DatumGetBool(dvalue);
-				break;
-			case INT8OID:
-				NUMERIC_DATA(result)[numels] = isnull ? NA_REAL : (double)DatumGetInt64(dvalue);
-				break;
-			case INT2OID:
-			case INT4OID:
-			case OIDOID:
-				INTEGER_DATA(result)[numels] = isnull ? NA_INTEGER : DatumGetInt32(dvalue);
-				break;
-			case FLOAT4OID:
-				NUMERIC_DATA(result)[numels] = isnull ? NA_REAL : DatumGetFloat4(dvalue);
-				break;
-			case FLOAT8OID:
-				NUMERIC_DATA(result)[numels] = isnull ? NA_REAL : DatumGetFloat8(dvalue);
-				break;
-			default:
-				value = isnull ? NULL : DatumGetCString(FunctionCall3(&out_func,
-															dvalue,
-															(Datum) 0,
-															Int32GetDatum(-1)));
-
-				/*
-					* Note that pg_get_one_r() replaces NULL values with
-					* the NA value appropriate for the data type.
-					*/
-				pg_get_one_r(value, element_type, &result, numels);
-				if (value != NULL)
-					pfree(value);
-		}
-	}
-
-	if (numels != totalrows)
-		SET_LENGTH(result, numels);
-
-	UNPROTECT(1);	/* result */
-
-	return result;
-}
-
-/*
- * Given an array of pg tuples, convert to an R list
- * the created object is not quite actually a data.frame
- */
-SEXP
-pg_window_frame_get_r_frame(WindowObject winobj, int argno, plr_function* function)
-{
-	int		 nc, nc_non_dropped = 0, df_colnum = 0, j;
-	Oid		 element_type, typelem;
-	SEXP		names, row_names;
-	char		buf[256];
-	SEXP		result, *fldvecs;
-	Oid		 tupType;
-	int32	   tupTypmod;
-	TupleDesc   tupdesc;
-	Datum	   dvalue;
-	HeapTuple   tuple;
-	HeapTupleHeader tuple_hdr;
-	bool		isnull;
-	bool		isout = false;
-	bool		isrel = function->arg_is_rel[argno];
-	int64	   i, numels, nr = WinGetPartitionRowCount(winobj);
-
-	if (isrel == false || nr < 1)
-		return R_NilValue;
-
-	// Get current row for starters, set mark
-	dvalue = WinGetFuncArgInFrame(winobj, argno, 0, WINDOW_SEEK_HEAD,
-								  true, &isnull, &isout);
-	if (isout)
-		return R_NilValue;
-
-	/* Count non-dropped attributes so we can later ignore the dropped ones */
-	tuple_hdr = DatumGetHeapTupleHeader(dvalue);
-	tupType   = HeapTupleHeaderGetTypeId(tuple_hdr);
-	tupTypmod = HeapTupleHeaderGetTypMod(tuple_hdr);
-	tupdesc   = lookup_rowtype_tupdesc(tupType, tupTypmod);
-	nc		= tupdesc->natts;
-	for (j = 0; j < nc; j++)
-	{
-		if (!TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
-			nc_non_dropped++;
-	}
-
-	/*
-	 * Allocate the data.frame initially as a list,
-	 * and also allocate a names vector for the column names
-	 * and an array of pointers to vectors for each dataframe col
-	 */
-	PROTECT(result = NEW_LIST(nc_non_dropped));
-	PROTECT(names = NEW_CHARACTER(nc_non_dropped));
-	fldvecs = palloc(nc_non_dropped * sizeof(SEXP));
-
-	for (numels = 0; ; numels++)
-	{
-		if (numels > 0)
-		{
-		   // Update dvalue to next row's tuple
-			dvalue = WinGetFuncArgInFrame(winobj, argno, numels, WINDOW_SEEK_HEAD, false, &isnull, &isout);
-			if (isout)
-				break;  // past end of frame
-		}
-		if (!isnull)
+		if (isrel && !isnull)
 		{
 			// Allocate new heaptuple for this row and set contents
 			tuple = palloc(sizeof(HeapTupleData));
@@ -483,96 +422,121 @@ pg_window_frame_get_r_frame(WindowObject winobj, int argno, plr_function* functi
 			tuple->t_tableOid = InvalidOid;
 			tuple->t_data = tuple_hdr;
 		}
+
 		for (df_colnum = 0, j = 0; j < nc; j++)
 		{
-			/* ignore dropped attributes */
-			if (TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
-				continue;
-
-			/* set column name */
-			if (numels == 0)
-				SET_COLUMN_NAMES;
-
-			/* get column datatype oid */
-			element_type = SPI_gettypeid(tupdesc, j + 1);
-
-			/*
-			 * Check to see if it is an array type. get_element_type will return
-			 * InvalidOid instead of actual element type if the type is not a
-			 * varlena array.
-			 */
-			typelem = get_element_type(element_type);
-
-			if (numels == 0)
+			if (isrel)
 			{
-				/* get new vector of the appropriate type and length */
-				if (typelem == InvalidOid)
-					PROTECT(fldvecs[df_colnum] = get_r_vector(element_type, nr));
-				else
-					PROTECT(fldvecs[df_colnum] = NEW_LIST(nr));
-			}
+				/* ignore dropped attributes */
+				if (TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+					continue;
 
-			if (typelem == InvalidOid)
-			{
-				/* not an array type */
-				char	   *value;
+				/* set column names */
+				if (numels == 0)
+					SET_COLUMN_NAMES;
 
-				value = isnull ? NULL : SPI_getvalue(tuple, tupdesc, j + 1);
-				/*
-				* Note that pg_get_one_r() replaces NULL values with
-				* the NA value appropriate for the data type.
-				*/
-				pg_get_one_r(value, element_type, &fldvecs[df_colnum], numels);
-			}
-			else
-			{
-				/* array type */
-				Datum	   value;
-				bool		isvaluenull;
-				SEXP		fldvec_elem;
-				int16	   typlen;
-				bool		typbyval;
-				char		typdelim;
-				char		typalign;
-				Oid		 typoutput, typioparam;
-				FmgrInfo	outputproc;
-
-				if (!isnull)
+				/* update column datatype oid and check for embedded array */
+				element_type = SPI_gettypeid(tupdesc, j + 1);
+				typelem = get_element_type(element_type);
+				if (typelem != InvalidOid)
 				{
 					get_type_io_data(typelem, IOFunc_output, &typlen, &typbyval, &typalign, &typdelim, &typioparam, &typoutput);
 					fmgr_info(typoutput, &outputproc);
+				}
+			}
+
+			if (numels == 0)
+			{
+				/* allocate new vector of the appropriate type and length */
+				if (typelem == InvalidOid)
+					// dealing with scalars of element_type
+					PROTECT(v = get_r_vector(element_type, nr));
+				else
+					// dealing with arrays (containing typelem's)
+					PROTECT(v = NEW_LIST(nr));
+				SET_VECTOR_ELT(result, df_colnum, v);
+				UNPROTECT(1);
+			}
+
+			v = VECTOR_ELT(result, df_colnum);
+
+			if (typelem == InvalidOid)
+			{
+				/* scalar type (regardless of whether embedded in a tuple or not) */
+				char	   *value;
+				switch (element_type)
+				{
+					case BOOLOID:
+						LOGICAL_DATA(v)[numels] = isnull ? NA_LOGICAL : DatumGetBool(dvalue);
+						break;
+					case INT8OID:
+						NUMERIC_DATA(v)[numels] = isnull ? NA_REAL : (double)DatumGetInt64(dvalue);
+						break;
+					case INT2OID:
+					case INT4OID:
+					case OIDOID:
+						INTEGER_DATA(v)[numels] = isnull ? NA_INTEGER : DatumGetInt32(dvalue);
+						break;
+					case FLOAT4OID:
+						NUMERIC_DATA(v)[numels] = isnull ? NA_REAL : DatumGetFloat4(dvalue);
+						break;
+					case FLOAT8OID:
+						NUMERIC_DATA(v)[numels] = isnull ? NA_REAL : DatumGetFloat8(dvalue);
+						break;
+					default:
+						value = isnull ? NULL :
+						(!isrel ? DatumGetCString(FunctionCall3(&out_func, dvalue, (Datum) 0, Int32GetDatum(-1))) : SPI_getvalue(tuple, tupdesc, j + 1));
+						/*
+						 * Note that pg_get_one_r() replaces NULL values with
+						 * the NA value appropriate for the data type.
+						 */
+						pg_get_one_r(value, element_type, v, numels);
+						if (value != NULL)
+							pfree(value);
+				}
+			}
+			else
+			{
+				/* array type (regardless of whether embedded in a tuple or not) */
+				SEXP		fldvec_elem;
+				Datum	   value = dvalue;
+				bool		isvaluenull = isnull;
+				if (isrel && !isnull)
 					value = SPI_getbinval(tuple, tupdesc, j + 1, &isvaluenull);
 
-					if (!isvaluenull)
-						PROTECT(fldvec_elem = pg_array_get_r(value, outputproc, typlen, typbyval, typalign));
-					else
-						PROTECT(fldvec_elem = R_NilValue);
-
-					SET_VECTOR_ELT(fldvecs[df_colnum], numels, fldvec_elem);
-					UNPROTECT(1);
-				}
+				if (!isvaluenull)
+					PROTECT(fldvec_elem = pg_array_get_r(value, outputproc, typlen, typbyval, typalign));
 				else
-				{
-					SET_VECTOR_ELT(fldvecs[df_colnum], numels, R_NilValue);
-				}
+					PROTECT(fldvec_elem = R_NilValue);
+				SET_VECTOR_ELT(v, numels, fldvec_elem);
+				UNPROTECT(1);
 			}
 			df_colnum++;
 		}
-		if (!isnull)
+
+		if (isrel && !isnull)
 			pfree(tuple);
 	}
 
-	/* Create data.frame from fldvectors */
+	/* Resize all vectors from nr (rows in partition) down to numels (rows in frame) */
 	for (df_colnum = 0, j = 0; j < nc; j++)
 	{
-		if (TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+		if (isrel && TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
 			continue;
+		v = VECTOR_ELT(result, df_colnum);
 		if (numels != nr)
-			SET_LENGTH(fldvecs[df_colnum], numels);
-		SET_VECTOR_ELT(result, df_colnum, fldvecs[df_colnum]);
+			SET_LENGTH(v, numels);
+		SET_VECTOR_ELT(result, df_colnum, v);
 		df_colnum++;
 	}
-	UNPROTECT(df_colnum);
+
+	/* for non-tuple arguments return now */
+	if (!isrel)
+	{
+		v = VECTOR_ELT(result, 0);
+		UNPROTECT(1); /* result */
+		return v;
+	}
 
 	/* attach the column names */
 	setAttrib(result, R_NamesSymbol, names);
@@ -589,7 +553,7 @@ pg_window_frame_get_r_frame(WindowObject winobj, int argno, plr_function* functi
 	/* finally, tell R we are a data.frame */
 	setAttrib(result, R_ClassSymbol, mkString("data.frame"));
 	ReleaseTupleDesc(tupdesc);
-	UNPROTECT(3);
+	UNPROTECT(3); /* result, names, row-names */
 	return result;
 }
 #endif
@@ -683,7 +647,7 @@ pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc)
 				char	   *value;
 
 				value = SPI_getvalue(tuples[i], tupdesc, j + 1);
-				pg_get_one_r(value, element_type, &fldvec, i);
+				pg_get_one_r(value, element_type, fldvec, i);
 			}
 			else
 			{
@@ -774,7 +738,7 @@ get_r_vector(Oid typtype, int64 numels)
  * given a single non-array pg value, convert to its R value representation
  */
 static void
-pg_get_one_r(char *value, Oid typtype, SEXP *obj, int elnum)
+pg_get_one_r(char *value, Oid typtype, SEXP obj, int elnum)
 {
 	switch (typtype)
 	{
@@ -783,9 +747,9 @@ pg_get_one_r(char *value, Oid typtype, SEXP *obj, int elnum)
 		case INT4OID:
 			/* 2 and 4 byte integer pgsql datatype => use R INTEGER */
 			if (value)
-				INTEGER_DATA(*obj)[elnum] = atoi(value);
+				INTEGER_DATA(obj)[elnum] = atoi(value);
 			else
-				INTEGER_DATA(*obj)[elnum] = NA_INTEGER;
+				INTEGER_DATA(obj)[elnum] = NA_INTEGER;
 			break;
 		case INT8OID:
 		case FLOAT4OID:
@@ -798,22 +762,22 @@ pg_get_one_r(char *value, Oid typtype, SEXP *obj, int elnum)
 			 * because R INTEGER is only 4 byte
 			 */
 			if (value)
-				NUMERIC_DATA(*obj)[elnum] = atof(value);
+				NUMERIC_DATA(obj)[elnum] = atof(value);
 			else
-				NUMERIC_DATA(*obj)[elnum] = NA_REAL;
+				NUMERIC_DATA(obj)[elnum] = NA_REAL;
 			break;
 		case BOOLOID:
 			if (value)
-				LOGICAL_DATA(*obj)[elnum] = ((*value == 't') ? 1 : 0);
+				LOGICAL_DATA(obj)[elnum] = ((*value == 't') ? 1 : 0);
 			else
-				LOGICAL_DATA(*obj)[elnum] = NA_LOGICAL;
+				LOGICAL_DATA(obj)[elnum] = NA_LOGICAL;
 			break;
 		default:
 			/* Everything else is defaulted to string */
 			if (value)
-				SET_STRING_ELT(*obj, elnum, COPY_TO_USER_STRING(value));
+				SET_STRING_ELT(obj, elnum, COPY_TO_USER_STRING(value));
 			else
-				SET_STRING_ELT(*obj, elnum, NA_STRING);
+				SET_STRING_ELT(obj, elnum, NA_STRING);
 	}
 }
 
