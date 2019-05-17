@@ -460,9 +460,9 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 
 			v = VECTOR_ELT(result, df_colnum);
 
-			if (typelem == InvalidOid)
+			if (!isrel && typelem == InvalidOid)
 			{
-				/* scalar type (regardless of whether embedded in a tuple or not) */
+				/* scalar type */
 				char	   *value;
 				switch (element_type)
 				{
@@ -485,7 +485,7 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 						break;
 					default:
 						value = isnull ? NULL :
-						(!isrel ? DatumGetCString(FunctionCall3(&out_func, dvalue, (Datum) 0, Int32GetDatum(-1))) : SPI_getvalue(tuple, tupdesc, j + 1));
+							DatumGetCString(FunctionCall3(&out_func, dvalue, (Datum) 0, Int32GetDatum(-1)));
 						/*
 						 * Note that pg_get_one_r() replaces NULL values with
 						 * the NA value appropriate for the data type.
@@ -495,7 +495,18 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 							pfree(value);
 				}
 			}
-			else
+			else if (isrel && typelem == InvalidOid)
+			{
+				char *value = isnull ? NULL : SPI_getvalue(tuple, tupdesc, j + 1);
+				/*
+				 * Note that pg_get_one_r() replaces NULL values with
+				 * the NA value appropriate for the data type.
+				 */
+				pg_get_one_r(value, element_type, v, numels);
+				if (value != NULL)
+					pfree(value);
+			}
+			else /* typelem != InvalidOid, i.e.: */
 			{
 				/* array type (regardless of whether embedded in a tuple or not) */
 				SEXP		fldvec_elem;
