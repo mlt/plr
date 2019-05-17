@@ -305,7 +305,8 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 		/* switch to long lived context to create plan description elements */
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-		PLR_ALLOC_RESULT_PTRS(&plan_desc->result);
+		plan_desc->result.atts = (plr_result_entry *)
+			palloc0(plan_desc->result.natts * sizeof(plr_result_entry));
 		argtypes = palloc0(plan_desc->result.natts * sizeof(Oid));
 
 		MemoryContextSwitchTo(oldcontext);
@@ -640,7 +641,7 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	for (i = 0; i < nargs; i++)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
-		plan_desc->result.atts[i].get_datum = get_get_datum(obj, plan_desc->result.atts[i].elem_typid, &plan_desc->result.atts[i].data_ptr);
+		plan_desc->result.atts[i].get_datum = get_get_datum(obj, &plan_desc->result.atts[i]);
 		argvalues[i] = get_scalar_datum(obj, &plan_desc->result, i, &isnull, 0);
 		if (!isnull)
 			nulls[i] = ' ';

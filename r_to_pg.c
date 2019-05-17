@@ -36,37 +36,37 @@
 extern char *last_R_error_msg;
 
 Datum
-altintsxp_get_int2(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+altintsxp_get_int2(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	const int el = ALTINTEGER_ELT(rval, idx);
+	const int el = INTEGER_ELT(rval, idx);
 	*isnull = NA_INTEGER == el;
 	return Int16GetDatum((int16)el);
 }
 
 Datum
-intsxp_get_int2(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+intsxp_get_int2(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	*isnull = NA_INTEGER == ((int*)data_ptr)[idx];
-	return Int16GetDatum((int16)(((int*)data_ptr)[idx]));
+	*isnull = NA_INTEGER == ((int*)e->data_ptr)[idx];
+	return Int16GetDatum((int16)(((int*)e->data_ptr)[idx]));
 }
 
 Datum
-altintsxp_get_int4(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+altintsxp_get_int4(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	const int el = ALTINTEGER_ELT(rval, idx);
+	const int el = INTEGER_ELT(rval, idx);
 	*isnull = NA_INTEGER == el;
 	return Int32GetDatum(el);
 }
 
 Datum
-intsxp_get_int4(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+intsxp_get_int4(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	*isnull = NA_INTEGER == ((int*)data_ptr)[idx];
-	return Int32GetDatum(((int*)data_ptr)[idx]);
+	*isnull = NA_INTEGER == ((int*)e->data_ptr)[idx];
+	return Int32GetDatum(((int*)e->data_ptr)[idx]);
 }
 
 Datum
-realsxp_get_float4(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+realsxp_get_float4(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
 	const double el = REAL_ELT(rval, idx);
 	*isnull = ISNA(el);
@@ -74,22 +74,22 @@ realsxp_get_float4(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, v
 }
 
 Datum
-altrealsxp_get_float8(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+altrealsxp_get_float8(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	const double el = ALTREAL_ELT(rval, idx);
+	const double el = REAL_ELT(rval, idx);
 	*isnull = ISNA(el);
 	return Float8GetDatum(el);
 }
 
 Datum
-realsxp_get_float8(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+realsxp_get_float8(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
-	*isnull = ISNA(((double*)data_ptr)[idx]);
-	return Float8GetDatum(((double*)data_ptr)[idx]);
+	*isnull = ISNA(((double*)e->data_ptr)[idx]);
+	return Float8GetDatum(((double*)e->data_ptr)[idx]);
 }
 
 Datum
-realsxp_get_int8(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+realsxp_get_int8(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
 	const double el = REAL_ELT(rval, idx);
 	*isnull = ISNA(el);
@@ -97,7 +97,7 @@ realsxp_get_int8(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, voi
 }
 
 Datum
-realsxp_get_numeric(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+realsxp_get_numeric(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
 	const double el = REAL_ELT(rval, idx);
 	*isnull = ISNA(el);
@@ -105,7 +105,7 @@ realsxp_get_numeric(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, 
 }
 
 Datum
-get_bytea(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+get_bytea(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
 	SEXP		obj;
 	int			len, rsize, status;
@@ -141,7 +141,7 @@ get_bytea(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data
 }
 
 static inline Datum
-get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr)
+get_scalar_datum_through_text(SEXP rval, int idx, plr_result_entry *e, bool *isnull)
 {
 	SEXP		obj;
 	const char *value;
@@ -202,7 +202,7 @@ get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo *result_in_func, bool
 	if (value != NULL)
 	{
 		*isnull = false;
-		return FunctionCall3(result_in_func,
+		return FunctionCall3(&e->elem_in_func,
 							 CStringGetDatum(value),
 							 ObjectIdGetDatum(0),
 							 Int32GetDatum(-1));
@@ -213,12 +213,12 @@ get_scalar_datum_through_text(SEXP rval, int idx, FmgrInfo *result_in_func, bool
 }
 
 get_datum_type
-get_get_datum(SEXP rval, Oid typid, void** data_ptr)
+get_get_datum(SEXP rval, plr_result_entry *e)
 {
 	const int sxp_type = TYPEOF(rval);
 	const bool is_std = !ALTREP(rval);
 
-	switch (typid)
+	switch (e->elem_typid)
 	{
 		case BOOLOID:
 		case INT4OID:
@@ -228,7 +228,7 @@ get_get_datum(SEXP rval, Oid typid, void** data_ptr)
 				case INTSXP:
 					if (is_std)
 					{
-						*data_ptr = STDVEC_DATAPTR(rval);
+						e->data_ptr = STDVEC_DATAPTR(rval);
 						return intsxp_get_int4;
 					}
 					else
@@ -247,7 +247,7 @@ get_get_datum(SEXP rval, Oid typid, void** data_ptr)
 				case INTSXP:
 					if (is_std)
 					{
-						*data_ptr = STDVEC_DATAPTR(rval);
+						e->data_ptr = STDVEC_DATAPTR(rval);
 						return intsxp_get_int2;
 					}
 					else
@@ -266,7 +266,7 @@ get_get_datum(SEXP rval, Oid typid, void** data_ptr)
 				case REALSXP:
 					if (is_std)
 					{
-						*data_ptr = STDVEC_DATAPTR(rval);
+						e->data_ptr = STDVEC_DATAPTR(rval);
 						return realsxp_get_float8;
 					}
 					else

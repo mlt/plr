@@ -682,7 +682,7 @@ r_get_tuple(SEXP rval, plr_result *result, FunctionCallInfo fcinfo)
 
 		if (result->atts[i].typid == result->atts[i].elem_typid)
 		{
-			result->atts[i].get_datum = get_get_datum(el, result->atts[i].elem_typid, &result->atts[i].data_ptr);
+			result->atts[i].get_datum = get_get_datum(el, &result->atts[i]);
 			values[i] = get_scalar_datum(el, result, i, isnull + i, 0);
 		}
 		else
@@ -703,6 +703,7 @@ Datum
 get_datum(SEXP rval, plr_result *result, int col, bool *isnull)
 {
 	Datum	dvalue;
+	plr_result_entry *e = &result->atts[col];
 
 	/* short circuit if return value is Null */
 	if (rval == R_NilValue || isNull(rval))	/* probably redundant */
@@ -712,9 +713,9 @@ get_datum(SEXP rval, plr_result *result, int col, bool *isnull)
 	}
 
 
-	if (result->atts[col].elem_typid == result->atts[col].typid)
+	if (e->elem_typid == e->typid)
 	{
-		result->atts[col].get_datum = get_get_datum(rval, result->atts[col].elem_typid, &result->atts[col].data_ptr);
+		e->get_datum = get_get_datum(rval, &result->atts[col]);
 		dvalue = get_scalar_datum(rval, result, col, isnull, 0);
 	}
 	else
@@ -952,6 +953,8 @@ get_tuplestore(SEXP rval, plr_result *result, FunctionCallInfo fcinfo)
 Datum
 get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx)
 {
+	plr_result_entry *e = &result->atts[col];
+
 	/*
 	 * passing a null into something like
 	 * return as.real(NULL) will return numeric(0)
@@ -963,18 +966,20 @@ get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx)
 		return (Datum)0;
 	}
 
-	Assert(result->atts[col].get_datum);
+	Assert(e->get_datum);
 
-	return (*result->atts[col].get_datum) (rval, idx, &result->atts[col].elem_in_func, isnull, result->atts[col].data_ptr);
+	return (*e->get_datum) (rval, idx, e, isnull);
 }
 
 static Datum
 get_array_datum(SEXP rval, plr_result *result, int col)
 {
+	plr_result_entry *e = &result->atts[col];
+
 	if (isFrame(rval))
 		return get_frame_array_datum(rval, result, col);
 
-	result->atts[col].get_datum = get_get_datum(rval, result->atts[col].elem_typid, &result->atts[col].data_ptr);
+	e->get_datum = get_get_datum(rval, e);
 
 	return get_md_array_datum(rval, result, col);
 }
@@ -997,7 +1002,7 @@ get_frame_array_datum(SEXP rval, plr_result *result, int col)
 	SEXP		dfcol = NULL;
 	int			j;
 	bool	   *nulls = NULL;
-	//get_datum_type mapper = get_mapper(TYPEOF(rval), result->atts[col].elem_typid);
+	plr_result_entry *e = &result->atts[col];
 
 	//Assert(result->atts[col].get_datum);
 
@@ -1008,7 +1013,7 @@ get_frame_array_datum(SEXP rval, plr_result *result, int col)
 	for (j = 0; j < nc; j++)
 	{
 		PROTECT(dfcol = VECTOR_ELT(rval, j));
-		result->atts[col].get_datum = get_get_datum(dfcol, result->atts[col].elem_typid, &result->atts[col].data_ptr);
+		e->get_datum = get_get_datum(dfcol, e);
 
 		if (j == 0)
 		{
@@ -1020,7 +1025,7 @@ get_frame_array_datum(SEXP rval, plr_result *result, int col)
 		for(i = 0; i < nr; i++)
 		{
 			idx = ((i * nc) + j);
-			dvalues[idx] = (*result->atts[col].get_datum) (dfcol, i, &result->atts[col].elem_in_func, nulls + idx, result->atts[col].data_ptr);
+			dvalues[idx] = (*e->get_datum) (dfcol, i, e, &nulls[idx]);
 		}
 		UNPROTECT(1);
 	}
@@ -1031,8 +1036,8 @@ get_frame_array_datum(SEXP rval, plr_result *result, int col)
 	lbs[1] = 1;
 
 	array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-							   result->atts[col].elem_typid, result->atts[col].elem_typlen,
-							   result->atts[col].elem_typbyval, result->atts[col].elem_typalign);
+							   e->elem_typid, e->elem_typlen,
+							   e->elem_typbyval, e->elem_typalign);
 
 	dvalue = PointerGetDatum(array);
 
@@ -1056,11 +1061,10 @@ get_md_array_datum(SEXP rval, plr_result *result, int col)
 	int			idx;
 	bool	   *nulls;
 	int			ndims;
-	FmgrInfo	in_func = result->atts[col].elem_in_func;
-	get_datum_type mapper = result->atts[col].get_datum;
-	void	   *data_ptr = result->atts[col].data_ptr;
+	plr_result_entry *e = &result->atts[col];
+	get_datum_type mapper = e->get_datum;
 
-	Assert(result->atts[col].get_datum);
+	Assert(mapper);
 
 	PROTECT(rdims = GET_DIM(rval));
 	ndims = length(rdims);
@@ -1117,12 +1121,12 @@ get_md_array_datum(SEXP rval, plr_result *result, int col)
 		for (j = 0; j < ndims; j++)
 			idx += subs[j] * cumprod[j];
 
-		dvalues[i] = (*mapper) (rval, idx, &in_func, &nulls[i], data_ptr);
+		dvalues[i] = (*mapper) (rval, idx, e, &nulls[i]);
 	}
 
 	array = construct_md_array(dvalues, nulls, ndims, dims, lbs,
-							   result->atts[col].elem_typid, result->atts[col].elem_typlen,
-							   result->atts[col].elem_typbyval, result->atts[col].elem_typalign);
+							   e->elem_typid, e->elem_typlen,
+							   e->elem_typbyval, e->elem_typalign);
 
 	dvalue = PointerGetDatum(array);
 
@@ -1206,7 +1210,7 @@ get_tuplestore_imp(SEXP rval,
 			el = VECTOR_ELT(rval, j);
 		else
 			el = rval;
-		result->atts[j].get_datum = get_get_datum(el, result->atts[j].elem_typid, &result->atts[j].data_ptr);
+		result->atts[j].get_datum = get_get_datum(el, &result->atts[j]);
 	}
 
 	for(i = 0; i < nr; i++)
@@ -1229,12 +1233,15 @@ get_tuplestore_imp(SEXP rval,
 				SETCAR(t, ScalarInteger(i + 1));
 				SETCADR(t, ScalarInteger(j + 1));
 				PROTECT(el = R_tryEval(args, R_GlobalEnv, &status));
-				result->atts[j].data_ptr = STDVEC_DATAPTR(el);
-				/* we expect PG array */
-				Assert(result->atts[j].typid != result->atts[j].elem_typid);
 
 				if (unlikely(status))
 					elog(ERROR, "Failed to get subscript");
+
+				if (!ALTREP(el))
+					result->atts[j].data_ptr = STDVEC_DATAPTR(el);
+
+				/* we expect PG array */
+				Assert(result->atts[j].typid != result->atts[j].elem_typid);
 			}
 
 			if (likely(result->atts[j].typid == result->atts[j].elem_typid))

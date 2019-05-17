@@ -422,7 +422,7 @@ typedef struct plr_func_hashkey
 } plr_func_hashkey;
 
 /* r to pg element conversion prototype */
-typedef Datum(*get_datum_type)(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr);
+typedef Datum(*get_datum_type)(SEXP rval, int idx, struct plr_result_entry *e, bool *isnull);
 
 typedef struct plr_result_entry
 {
@@ -506,7 +506,7 @@ extern SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* 
 extern SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
 extern Datum r_get_pg(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
 extern Datum get_datum(SEXP rval, plr_result *result, int col, bool *isnull);
-extern get_datum_type get_get_datum(SEXP rval, Oid typid, void** data_ptr);
+extern get_datum_type get_get_datum(SEXP rval, plr_result_entry *e);
 extern Datum get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx);
 
 /* Postgres support functions installed into the R interpreter */
@@ -547,15 +547,5 @@ extern void plr_HashTableInsert(plr_function *function,
 extern void plr_HashTableDelete(plr_function *function);
 extern char *get_load_self_ref_cmd(Oid langOid);
 extern void perm_fmgr_info(Oid functionId, FmgrInfo *finfo);
-
-/* inlined functions */
-inline void PLR_ALLOC_RESULT_PTRS(plr_result *result)
-{
-	if (0 == result->natts)
-		return;
-
-	result->atts = (plr_result_entry *)palloc0(result->natts * sizeof(plr_result_entry));
-}
-
 
 #endif   /* PLR_H */

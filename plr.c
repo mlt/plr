@@ -1174,7 +1174,9 @@ do_compile(FunctionCallInfo fcinfo,
 			elog(ERROR, "unknown function type %u", tfc);
 	}
 
-	PLR_ALLOC_RESULT_PTRS(&function->result);
+	if (function->result.natts > 0)
+		function->result.atts = (plr_result_entry *) palloc0(
+			function->result.natts * sizeof(plr_result_entry));
 
 	if (!is_trigger)
 	{
@@ -1230,25 +1232,25 @@ do_compile(FunctionCallInfo fcinfo,
 
 		for (i = 0; i < function->result.natts; i++)
 		{
+			plr_result_entry *const e = &function->result.atts[i];
+
 			if (TYPEFUNC_COMPOSITE == tfc)
-				function->result.atts[i].typid = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
+				e->typid = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
 			else
-				function->result.atts[i].typid = result_typid;
-			function->result.atts[i].elem_typid = get_element_type(function->result.atts[i].typid);
-			if (InvalidOid == function->result.atts[i].elem_typid)
-				function->result.atts[i].elem_typid = function->result.atts[i].typid;
-			if (OidIsValid(function->result.atts[i].elem_typid))
+				e->typid = result_typid;
+			e->elem_typid = get_element_type(e->typid);
+			if (InvalidOid == e->elem_typid)
+				e->elem_typid = e->typid;
+			if (OidIsValid(e->elem_typid))
 			{
 				char			typdelim;
 				Oid				typinput, typelem;
 
-				get_type_io_data(function->result.atts[i].elem_typid, IOFunc_input,
-					&function->result.atts[i].elem_typlen,
-					&function->result.atts[i].elem_typbyval,
-					&function->result.atts[i].elem_typalign,
-					&typdelim, &typelem, &typinput);
+				get_type_io_data(e->elem_typid, IOFunc_input,
+								 &e->elem_typlen, &e->elem_typbyval, &e->elem_typalign,
+								 &typdelim, &typelem, &typinput);
 
-				perm_fmgr_info(typinput, &function->result.atts[i].elem_in_func);
+				perm_fmgr_info(typinput, &e->elem_in_func);
 			}
 			else
 				elog(ERROR, "Invalid type for return attribute #%u", i);
