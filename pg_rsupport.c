@@ -643,7 +643,7 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	for (i = 0; i < nargs; i++)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
-		plan_desc->result.get_datum[i] = get_mapper(TYPEOF(obj), plan_desc->result.elem_typid[i]);
+		plan_desc->result.get_datum[i] = get_get_datum(obj, plan_desc->result.elem_typid[i], &plan_desc->result.data_ptr[i]);
 		argvalues[i] = get_scalar_datum(obj, &plan_desc->result, i, &isnull, 0);
 		if (!isnull)
 			nulls[i] = ' ';

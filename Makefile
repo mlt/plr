@@ -19,7 +19,7 @@ ifneq (,${R_HOME})
 EXTENSION	= plr
 MODULE_big	= plr
 PG_CPPFLAGS	+= $(r_includespec)
-SRCS		+= plr.c pg_conversion.c pg_backend_support.c pg_userfuncs.c pg_rsupport.c
+SRCS		+= plr.c pg_conversion.c pg_backend_support.c pg_userfuncs.c pg_rsupport.c r_to_pg.c
 OBJS		:= $(SRCS:.c=.o)
 SHLIB_LINK	+= -L$(r_libdir1x) -L$(r_libdir2x) -lR
 DATA		= plr--8.4.sql plr--8.3.0.18--8.4.sql plr--unpackaged--8.4.sql

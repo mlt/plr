@@ -93,6 +93,7 @@ if "%CI%"=="" ( if not exist data "$(pgroot)\bin\initdb" -D data )
     <ClCompile Include="pg_rsupport.c" />
     <ClCompile Include="pg_userfuncs.c" />
     <ClCompile Include="plr.c" />
+    <ClCompile Include="r_to_pg.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="plr.h" />

@@ -17,7 +17,7 @@ index a083ac7..fcf44b7 100644
  
 +	my $plr = $solution->AddProject('plr','dll','plr');
 +	$plr->AddFiles(
-+		'contrib\plr','plr.c','pg_conversion.c','pg_backend_support.c','pg_userfuncs.c','pg_rsupport.c'
++		'contrib\plr','plr.c','pg_conversion.c','pg_backend_support.c','pg_userfuncs.c','pg_rsupport.c','r_to_pg.c'
 +	);
 +	$plr->AddReference($postgres);
 +	$plr->AddLibrary('contrib/plr/R$(PlatformTarget).lib');

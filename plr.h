@@ -421,19 +421,28 @@ typedef struct plr_func_hashkey
 	Oid		argtypes[FUNC_MAX_ARGS];
 } plr_func_hashkey;
 
-/* element conversion prototype */
-typedef Datum (*get_datum_type)(SEXP rval, int idx, FmgrInfo *pg_restrict result_in_func, bool *pg_restrict isnull);
+/* r to pg element conversion prototype */
+typedef Datum(*get_datum_type)(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr);
 
 typedef struct plr_result
 {
 	int					natts;
 	Oid				   *typid;
-	Oid				   *elem_typid;
 	FmgrInfo		   *elem_in_func;
+	/* to be used by construct_md_array */
+	Oid				   *elem_typid;
 	int16			   *elem_typlen;
 	bool			   *elem_typbyval;
 	char			   *elem_typalign;
+	/* to speed up data conversion with indirect function call */
 	get_datum_type	   *get_datum;
+	/*
+	 * Data pointer for STDVEC (as in non-ALTREP).
+	 * It seems impossible in newer R (>=3.5.0) to get data pointer using macro/inline
+	 * so we can't easily obtain that while processing generic vector element.
+	 * Hence we have to cache it here.
+	 */
+	void			  **data_ptr;
 } plr_result;
 
 /* The information we cache about loaded procedures */
@@ -483,6 +492,7 @@ extern void load_r_cmd(const char *cmd);
 extern SEXP call_r_func(SEXP fun, SEXP rargs, SEXP rho);
 
 /* argument and return value conversion functions */
+extern SEXP coerce_to_char(SEXP rval);
 extern SEXP pg_scalar_get_r(Datum dvalue, Oid arg_typid, FmgrInfo arg_out_func);
 extern SEXP pg_array_get_r(Datum dvalue, FmgrInfo out_func, int typlen, bool typbyval, char typalign);
 #ifdef HAVE_WINDOW_FUNCTIONS
@@ -491,8 +501,8 @@ extern SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* 
 extern SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
 extern Datum r_get_pg(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
 extern Datum get_datum(SEXP rval, plr_result *result, int col, bool *isnull);
+extern get_datum_type get_get_datum(SEXP rval, Oid typid, void** data_ptr);
 extern Datum get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx);
-extern get_datum_type get_mapper(int sxp_type, Oid typid);
 
 /* Postgres support functions installed into the R interpreter */
 PGDLLEXPORT void throw_pg_log(int* elevel, const char **msg);
@@ -546,6 +556,8 @@ inline void PLR_ALLOC_RESULT_PTRS(plr_result *result)
 	result->elem_typbyval	= (bool *)			palloc0(result->natts * sizeof(bool));
 	result->elem_typalign	= (char *)			palloc0(result->natts * sizeof(char));
 	result->get_datum		= (get_datum_type *)palloc0(result->natts * sizeof(get_datum_type));
+	result->data_ptr		= (void *)			palloc0(result->natts * sizeof(void*));
 }
+
 
 #endif   /* PLR_H */
