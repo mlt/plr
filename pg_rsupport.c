@@ -304,17 +304,7 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 		/* switch to long lived context to create plan description elements */
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-		plan_desc->result.typid = (Oid *)palloc(plan_desc->result.natts * sizeof(Oid));
-		plan_desc->result.elem_typid = (Oid *)palloc(plan_desc->result.natts * sizeof(Oid));
-		plan_desc->result.elem_in_func = (FmgrInfo *) palloc(plan_desc->result.natts * sizeof(FmgrInfo));
-		plan_desc->result.elem_typlen = (int16 *)
-			palloc0(plan_desc->result.natts * sizeof(int));
-		plan_desc->result.elem_typbyval = (bool *)
-			palloc0(plan_desc->result.natts * sizeof(bool));
-		plan_desc->result.elem_typalign = (char *)
-			palloc0(plan_desc->result.natts * sizeof(char));
-		plan_desc->result.get_datum = (get_datum_type *)
-			palloc0(plan_desc->result.natts * sizeof(get_datum_type *));
+		PLR_ALLOC_RESULT_PTRS(&plan_desc->result);
 
 		MemoryContextSwitchTo(oldcontext);
 

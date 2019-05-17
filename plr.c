@@ -1174,23 +1174,7 @@ do_compile(FunctionCallInfo fcinfo,
 			elog(ERROR, "unknown function type %u", tfc);
 	}
 
-	if (function->result.natts > 0)
-	{
-		function->result.typid = (Oid *)
-			palloc0(function->result.natts * sizeof(Oid));
-		function->result.elem_typid = (Oid *)
-			palloc0(function->result.natts * sizeof(Oid));
-		function->result.elem_in_func = (FmgrInfo *)
-			palloc0(function->result.natts * sizeof(FmgrInfo));
-		function->result.elem_typlen = (int16 *)
-			palloc0(function->result.natts * sizeof(int));
-		function->result.elem_typbyval = (bool *)
-			palloc0(function->result.natts * sizeof(bool));
-		function->result.elem_typalign = (char *)
-			palloc0(function->result.natts * sizeof(char));
-		function->result.get_datum = (get_datum_type *)
-			palloc0(function->result.natts * sizeof(get_datum_type));
-	}
+	PLR_ALLOC_RESULT_PTRS(&function->result);
 
 	if (!is_trigger)
 	{

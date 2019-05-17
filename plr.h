@@ -533,4 +533,19 @@ extern void plr_HashTableDelete(plr_function *function);
 extern char *get_load_self_ref_cmd(Oid langOid);
 extern void perm_fmgr_info(Oid functionId, FmgrInfo *finfo);
 
+/* inlined functions */
+inline void PLR_ALLOC_RESULT_PTRS(plr_result *result)
+{
+	if (0 == result->natts)
+		return;
+
+	result->typid			= (Oid *)			palloc0(result->natts * sizeof(Oid));
+	result->elem_typid		= (Oid *)			palloc0(result->natts * sizeof(Oid));
+	result->elem_in_func	= (FmgrInfo *)		palloc0(result->natts * sizeof(FmgrInfo));
+	result->elem_typlen		= (int16 *)			palloc0(result->natts * sizeof(int));
+	result->elem_typbyval	= (bool *)			palloc0(result->natts * sizeof(bool));
+	result->elem_typalign	= (char *)			palloc0(result->natts * sizeof(char));
+	result->get_datum		= (get_datum_type *)palloc0(result->natts * sizeof(get_datum_type));
+}
+
 #endif   /* PLR_H */
