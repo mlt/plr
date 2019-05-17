@@ -268,6 +268,7 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 	saved_plan_desc	   *plan_desc;
 	SEXP				result;
 	MemoryContext		oldcontext;
+	Oid				   *argtypes;
 	PREPARE_PG_TRY;
 
 	/* set up error context */
@@ -305,6 +306,7 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 		oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
 		PLR_ALLOC_RESULT_PTRS(&plan_desc->result);
+		argtypes = palloc0(plan_desc->result.natts * sizeof(Oid));
 
 		MemoryContextSwitchTo(oldcontext);
 
@@ -314,24 +316,24 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 			Oid			typinput,
 						typelem;
 
-			plan_desc->result.typid[i] = INTEGER_ELT(rargtypes, i);
+			plan_desc->result.atts[i].typid = argtypes[i] = INTEGER_ELT(rargtypes, i);
 
 			/* switch to long lived context to create plan description elements */
 			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 
-			plan_desc->result.elem_typid[i] = get_element_type(plan_desc->result.typid[i]);
-			if (InvalidOid == plan_desc->result.elem_typid[i])
-				plan_desc->result.elem_typid[i] = plan_desc->result.typid[i];
-			get_type_io_data(plan_desc->result.elem_typid[i], IOFunc_input,
-							 plan_desc->result.elem_typlen + i,
-							 plan_desc->result.elem_typbyval + i,
-							 plan_desc->result.elem_typalign + i,
+			plan_desc->result.atts[i].elem_typid = get_element_type(plan_desc->result.atts[i].typid);
+			if (InvalidOid == plan_desc->result.atts[i].elem_typid)
+				plan_desc->result.atts[i].elem_typid = plan_desc->result.atts[i].typid;
+			get_type_io_data(plan_desc->result.atts[i].elem_typid, IOFunc_input,
+							 &plan_desc->result.atts[i].elem_typlen,
+							 &plan_desc->result.atts[i].elem_typbyval,
+							 &plan_desc->result.atts[i].elem_typalign,
 							 &typdelim, &typelem, &typinput);
 
 			MemoryContextSwitchTo(oldcontext);
 
 			/* perm_fmgr_info already uses TopMemoryContext */
-			perm_fmgr_info(typinput, &plan_desc->result.elem_in_func[i]);
+			perm_fmgr_info(typinput, &plan_desc->result.atts[i].elem_in_func);
 		}
 	}
 
@@ -347,7 +349,7 @@ plr_SPI_prepare(SEXP rsql, SEXP rargtypes)
 	PG_TRY();
 	{
 		/* Prepare plan for query */
-		pplan = SPI_prepare(sql, plan_desc->result.natts, plan_desc->result.natts > 0 ? plan_desc->result.typid : NULL);
+		pplan = SPI_prepare(sql, plan_desc->result.natts, plan_desc->result.natts > 0 ? argtypes : NULL);
 	}
 	PLR_PG_CATCH();
 	PLR_PG_END_TRY();
@@ -443,9 +445,6 @@ plr_SPI_execp(SEXP rsaved_plan, SEXP rargvalues)
 	saved_plan_desc	   *plan_desc = (saved_plan_desc *) R_ExternalPtrAddr(rsaved_plan);
 	void			   *saved_plan = plan_desc->saved_plan;
 	int					nargs = plan_desc->result.natts;
-	Oid				   *typeids = plan_desc->result.typid;
-	Oid				   *typelems = plan_desc->result.elem_typid;
-	FmgrInfo		   *typinfuncs = plan_desc->result.elem_in_func;
 	int					i;
 	Datum			   *argvalues = NULL;
 	char			   *nulls = NULL;
@@ -610,8 +609,6 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	saved_plan_desc	   *plan_desc = (saved_plan_desc *) R_ExternalPtrAddr(rsaved_plan);
 	void			   *saved_plan = plan_desc->saved_plan;
 	const int			nargs = plan_desc->result.natts;
-	Oid				   *typeids = plan_desc->result.typid;
-	FmgrInfo		   *typinfuncs = plan_desc->result.elem_in_func;
 	int					i;
 	Datum			   *argvalues = NULL;
 	char			   *nulls = NULL;
@@ -643,7 +640,7 @@ plr_SPI_cursor_open(SEXP cursor_name_arg,SEXP rsaved_plan, SEXP rargvalues)
 	for (i = 0; i < nargs; i++)
 	{
 		PROTECT(obj = VECTOR_ELT(rargvalues, i));
-		plan_desc->result.get_datum[i] = get_get_datum(obj, plan_desc->result.elem_typid[i], &plan_desc->result.data_ptr[i]);
+		plan_desc->result.atts[i].get_datum = get_get_datum(obj, plan_desc->result.atts[i].elem_typid, &plan_desc->result.atts[i].data_ptr);
 		argvalues[i] = get_scalar_datum(obj, &plan_desc->result, i, &isnull, 0);
 		if (!isnull)
 			nulls[i] = ' ';

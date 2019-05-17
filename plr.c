@@ -1231,24 +1231,24 @@ do_compile(FunctionCallInfo fcinfo,
 		for (i = 0; i < function->result.natts; i++)
 		{
 			if (TYPEFUNC_COMPOSITE == tfc)
-				function->result.typid[i] = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
+				function->result.atts[i].typid = TUPLE_DESC_ATTR(tupdesc, i)->atttypid;
 			else
-				function->result.typid[i] = result_typid;
-			function->result.elem_typid[i] = get_element_type(function->result.typid[i]);
-			if (InvalidOid == function->result.elem_typid[i])
-				function->result.elem_typid[i] = function->result.typid[i];
-			if (OidIsValid(function->result.elem_typid[i]))
+				function->result.atts[i].typid = result_typid;
+			function->result.atts[i].elem_typid = get_element_type(function->result.atts[i].typid);
+			if (InvalidOid == function->result.atts[i].elem_typid)
+				function->result.atts[i].elem_typid = function->result.atts[i].typid;
+			if (OidIsValid(function->result.atts[i].elem_typid))
 			{
 				char			typdelim;
 				Oid				typinput, typelem;
 
-				get_type_io_data(function->result.elem_typid[i], IOFunc_input,
-					function->result.elem_typlen + i,
-					function->result.elem_typbyval + i,
-					function->result.elem_typalign + i,
+				get_type_io_data(function->result.atts[i].elem_typid, IOFunc_input,
+					&function->result.atts[i].elem_typlen,
+					&function->result.atts[i].elem_typbyval,
+					&function->result.atts[i].elem_typalign,
 					&typdelim, &typelem, &typinput);
 
-				perm_fmgr_info(typinput, function->result.elem_in_func + i);
+				perm_fmgr_info(typinput, &function->result.atts[i].elem_in_func);
 			}
 			else
 				elog(ERROR, "Invalid type for return attribute #%u", i);

@@ -424,25 +424,30 @@ typedef struct plr_func_hashkey
 /* r to pg element conversion prototype */
 typedef Datum(*get_datum_type)(SEXP rval, int idx, FmgrInfo *result_in_func, bool *isnull, void *data_ptr);
 
-typedef struct plr_result
+typedef struct plr_result_entry
 {
-	int					natts;
-	Oid				   *typid;
-	FmgrInfo		   *elem_in_func;
+	Oid				typid;
+	FmgrInfo		elem_in_func;
 	/* to be used by construct_md_array */
-	Oid				   *elem_typid;
-	int16			   *elem_typlen;
-	bool			   *elem_typbyval;
-	char			   *elem_typalign;
+	Oid				elem_typid;
+	int16			elem_typlen;
+	bool			elem_typbyval;
+	char			elem_typalign;
 	/* to speed up data conversion with indirect function call */
-	get_datum_type	   *get_datum;
+	get_datum_type	get_datum;
 	/*
 	 * Data pointer for STDVEC (as in non-ALTREP).
 	 * It seems impossible in newer R (>=3.5.0) to get data pointer using macro/inline
 	 * so we can't easily obtain that while processing generic vector element.
 	 * Hence we have to cache it here.
 	 */
-	void			  **data_ptr;
+	void		   *data_ptr;
+} plr_result_entry;
+
+typedef struct plr_result
+{
+	int					natts;
+	plr_result_entry   *atts;
 } plr_result;
 
 /* The information we cache about loaded procedures */
@@ -549,14 +554,7 @@ inline void PLR_ALLOC_RESULT_PTRS(plr_result *result)
 	if (0 == result->natts)
 		return;
 
-	result->typid			= (Oid *)			palloc0(result->natts * sizeof(Oid));
-	result->elem_typid		= (Oid *)			palloc0(result->natts * sizeof(Oid));
-	result->elem_in_func	= (FmgrInfo *)		palloc0(result->natts * sizeof(FmgrInfo));
-	result->elem_typlen		= (int16 *)			palloc0(result->natts * sizeof(int));
-	result->elem_typbyval	= (bool *)			palloc0(result->natts * sizeof(bool));
-	result->elem_typalign	= (char *)			palloc0(result->natts * sizeof(char));
-	result->get_datum		= (get_datum_type *)palloc0(result->natts * sizeof(get_datum_type));
-	result->data_ptr		= (void *)			palloc0(result->natts * sizeof(void*));
+	result->atts = (plr_result_entry *)palloc0(result->natts * sizeof(plr_result_entry));
 }
 
 
