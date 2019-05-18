@@ -355,7 +355,7 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 	int32	   tupTypmod;
 	TupleDesc   tupdesc;
 	/* for array arguments */
-	Oid		 typelem = get_element_type(element_type);
+	Oid		 typelem = function->arg_elem[argno];
 	int16	   typlen;
 	bool		typbyval;
 	char		typdelim, typalign;
@@ -366,20 +366,24 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 		return R_NilValue;
 
 	/*
-	 * Check to see if arg is an array type. get_element_type() will return
+	 * Check to see if arg is an array type. typelem will be
 	 * InvalidOid instead of actual element type if the type is not a
 	 * varlena array.
 	 */
 	if (!isrel && typelem != InvalidOid)
 	{
-		get_type_io_data(typelem, IOFunc_output, &typlen, &typbyval, &typalign, &typdelim, &typioparam, &typoutput);
-		fmgr_info(typoutput, &outputproc);
+		typlen = function->arg_elem_typlen[argno];
+		typbyval = function->arg_elem_typbyval[argno];
+		typalign = function->arg_elem_typalign[argno];
+		outputproc = function->arg_elem_out_func[argno];
 	}
 
 	if (isrel)
 	{
-		/* Get current row for starters, setting mark
-		 Need this to get tuple info in order to build an R dataframe */
+		/*
+		   Get current row for starters, setting mark
+		   Need this to get tuple info in order to build an R dataframe
+		*/
 		dvalue = WinGetFuncArgInFrame(winobj, argno, 0, WINDOW_SEEK_HEAD,
 									  true, &isnull, &isout);
 		if (isout || isnull)
@@ -459,7 +463,6 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 			}
 
 			v = VECTOR_ELT(result, df_colnum);
-
 			if (!isrel && typelem == InvalidOid)
 			{
 				/* scalar type */
@@ -498,10 +501,6 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 			else if (isrel && typelem == InvalidOid)
 			{
 				char *value = isnull ? NULL : SPI_getvalue(tuple, tupdesc, j + 1);
-				/*
-				 * Note that pg_get_one_r() replaces NULL values with
-				 * the NA value appropriate for the data type.
-				 */
 				pg_get_one_r(value, element_type, v, numels);
 				if (value != NULL)
 					pfree(value);
@@ -530,15 +529,16 @@ pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* function)
 	}
 
 	/* Resize all vectors from nr (rows in partition) down to numels (rows in frame) */
-	for (df_colnum = 0, j = 0; j < nc; j++)
+	if (numels < nr)
 	{
-		if (isrel && TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
-			continue;
-		v = VECTOR_ELT(result, df_colnum);
-		if (numels != nr)
-			SET_LENGTH(v, numels);
-		SET_VECTOR_ELT(result, df_colnum, v);
-		df_colnum++;
+		for (df_colnum = 0, j = 0; j < nc; j++)
+		{
+			if (isrel && TUPLE_DESC_ATTR(tupdesc,j)->attisdropped)
+				continue;
+			v = VECTOR_ELT(result, df_colnum);
+			SET_VECTOR_ELT(result, df_colnum, SET_LENGTH(v, numels));
+			df_colnum++;
+		}
 	}
 
 	/* for non-tuple arguments return now */

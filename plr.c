@@ -1690,9 +1690,10 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 				lst = PROTECT(allocVector(VECSXP, function->nargs));
 				for (i = 0; i < function->nargs; i++, t = CDR(t))
 				{
-					el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
-						R_NilValue : */ pg_window_frame_get_r(winobj, i, function);
+					PROTECT(el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
+						R_NilValue : */ pg_window_frame_get_r(winobj, i, function));
 					SET_VECTOR_ELT(lst, i, el);
+					UNPROTECT(1);
 					SETCAR(t, el);
 				}
 				defineVar(install(PLR_WINDOW_FRAME_NAME), lst, rho);
@@ -1713,10 +1714,11 @@ plr_convertargs(plr_function *function, Datum *arg, bool *argnull, FunctionCallI
 		else
 			for (i = 0; i < function->nargs; i++, t = CDR(t))
 			{
-				el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
-					R_NilValue : */ pg_window_frame_get_r(winobj, i, function);
+				PROTECT(el = /* get_fn_expr_arg_stable(fcinfo->flinfo, i) ?
+					R_NilValue : */ pg_window_frame_get_r(winobj, i, function));
 
 				SETCAR(t, el);
+				UNPROTECT(1);
 			}
 
 		// below only works if last el <> R_NilValue (see commented out above)
