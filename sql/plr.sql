@@ -3,7 +3,7 @@
 -- does not depend on contents of plr.sql.
 --
 \set ECHO none
-\i plr.sql
+create extension plr version '8.4';
 \set ECHO all
 
 -- make sure we get the notices
