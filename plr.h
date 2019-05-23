@@ -421,8 +421,10 @@ typedef struct plr_func_hashkey
 	Oid		argtypes[FUNC_MAX_ARGS];
 } plr_func_hashkey;
 
+struct plr_result_entry;
+
 /* r to pg element conversion prototype */
-typedef Datum(*get_datum_type)(SEXP rval, int idx, struct plr_result_entry *e, bool *isnull);
+typedef Datum(*get_datum_type)(struct plr_result_entry *e, int idx, bool *isnull);
 
 typedef struct plr_result_entry
 {
@@ -442,6 +444,7 @@ typedef struct plr_result_entry
 	 * Hence we have to cache it here.
 	 */
 	void		   *data_ptr;
+	SEXP			rval;
 } plr_result_entry;
 
 typedef struct plr_result
@@ -506,8 +509,8 @@ extern SEXP pg_window_frame_get_r(WindowObject winobj, int argno, plr_function* 
 extern SEXP pg_tuple_get_r_frame(int ntuples, HeapTuple *tuples, TupleDesc tupdesc);
 extern Datum r_get_pg(SEXP rval, plr_result *result, FunctionCallInfo fcinfo);
 extern Datum get_datum(SEXP rval, plr_result *result, int col, bool *isnull);
-extern get_datum_type get_get_datum(SEXP rval, plr_result_entry *e);
-extern Datum get_scalar_datum(SEXP rval, plr_result *result, int col, bool *isnull, int idx);
+extern void get_get_datum(SEXP rval, plr_result_entry *e);
+extern Datum get_scalar_datum(plr_result_entry *e, bool *isnull, int idx);
 
 /* Postgres support functions installed into the R interpreter */
 PGDLLEXPORT void throw_pg_log(int* elevel, const char **msg);
