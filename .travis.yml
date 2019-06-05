@@ -5,6 +5,7 @@ language: c
 sudo : required 
 env:
   - PG=11
+    R_GCTORTURE=1
   - PG=10
   - PG=9.6
   - PG=9.5
@@ -24,7 +25,13 @@ before_script:
   - sudo apt-get install postgresql-server-dev-$PG
   - echo 'local   all             postgres                                trust' | sudo tee /etc/postgresql/$PG/main/pg_hba.conf > /dev/null
   - setfacl -Rm u:postgres:rwx,d:u:travis:rwx $HOME
-  - sudo pg_ctlcluster $PG main reload
+  - |
+    if [ -n "$R_GCTORTURE" ]; then
+      echo $'R_GCTORTURE=50\nR_GCTORTURE_WAIT=20\nR_GCTORTURE_INHIBIT_RELEASE=1' | sudo tee -a /etc/postgresql/$PG/main/environment
+      sudo sed -i '2 a ulimit -c unlimited -S' /etc/init.d/postgresql
+      echo /tmp/core.%p.sig%s.%ts | sudo tee -a /proc/sys/kernel/core_pattern
+    fi
+  - sudo pg_ctlcluster $PG main restart
 
 script:
   - sudo pg_lsclusters
