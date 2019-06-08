@@ -27,11 +27,11 @@ before_script:
   - setfacl -Rm u:postgres:rwx,d:u:travis:rwx $HOME
   - |
     if [ -n "$R_GCTORTURE" ]; then
-      echo $'R_GCTORTURE=50\nR_GCTORTURE_WAIT=20\nR_GCTORTURE_INHIBIT_RELEASE=1' | sudo tee -a /etc/postgresql/$PG/main/environment
-      sudo sed -i '2 a ulimit -c unlimited -S' /etc/init.d/postgresql
+      echo $'R_GCTORTURE=40\nR_GCTORTURE_WAIT=20\nR_GCTORTURE_INHIBIT_RELEASE=1' | sudo tee -a /etc/postgresql/$PG/main/environment
+      sudo sed -i '2 a ulimit -c unlimited' /etc/init.d/postgresql
       echo /tmp/core.%p.sig%s.%ts | sudo tee -a /proc/sys/kernel/core_pattern
     fi
-  - sudo pg_ctlcluster $PG main restart
+  - sudo service postgresql restart $PG
 #  - ulimit -c unlimited -S       # enable core dumps
 
 script:
